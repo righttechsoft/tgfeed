@@ -1,0 +1,327 @@
+"""Web UI for TGFeed."""
+
+import json
+import logging
+import time
+from bottle import Bottle, request, response, static_file, TEMPLATE_PATH
+from pathlib import Path
+
+from config import DATA_DIR
+from database import Database
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+app = Bottle()
+
+# Templates directory
+TEMPLATE_DIR = Path(__file__).parent / "templates"
+TEMPLATE_DIR.mkdir(exist_ok=True)
+
+# Static files directory
+STATIC_DIR = TEMPLATE_DIR / "static"
+
+
+@app.route("/")
+def index():
+    """Main page."""
+    return TEMPLATE_DIR.joinpath("index.html").read_text(encoding="utf-8")
+
+
+@app.route("/api/channels")
+def get_channels():
+    """Get all channels with groups and stats."""
+    response.content_type = "application/json"
+    with Database() as db:
+        channels = db.get_all_channels_with_groups()
+        result = []
+        for row in channels:
+            channel = dict(row)
+            stats = db.get_channel_stats(channel["id"])
+            channel["stats"] = stats
+            result.append(channel)
+        return json.dumps(result)
+
+
+@app.route("/api/groups")
+def get_groups():
+    """Get all groups with channel counts."""
+    response.content_type = "application/json"
+    with Database() as db:
+        groups = db.get_all_groups()
+        result = []
+        for row in groups:
+            group = dict(row)
+            group["channel_count"] = db.get_group_channel_count(group["id"])
+            result.append(group)
+        return json.dumps(result)
+
+
+@app.route("/api/group", method="POST")
+def create_group():
+    """Create a new group."""
+    response.content_type = "application/json"
+    data = request.json
+    name = data.get("name", "").strip()
+    if not name:
+        response.status = 400
+        return json.dumps({"error": "Group name is required"})
+    with Database() as db:
+        group_id = db.create_group(name)
+        db.commit()
+        return json.dumps({"success": True, "id": group_id, "name": name})
+
+
+@app.route("/api/group/<group_id:int>", method="PUT")
+def rename_group(group_id):
+    """Rename a group."""
+    response.content_type = "application/json"
+    data = request.json
+    name = data.get("name", "").strip()
+    if not name:
+        response.status = 400
+        return json.dumps({"error": "Group name is required"})
+    with Database() as db:
+        db.rename_group(group_id, name)
+        db.commit()
+        return json.dumps({"success": True})
+
+
+@app.route("/api/group/<group_id:int>", method="DELETE")
+def delete_group(group_id):
+    """Delete a group."""
+    response.content_type = "application/json"
+    with Database() as db:
+        db.delete_group(group_id)
+        db.commit()
+        return json.dumps({"success": True})
+
+
+@app.route("/api/channel/<channel_id:int>/active", method="POST")
+def update_active(channel_id):
+    """Update channel active status."""
+    response.content_type = "application/json"
+    data = request.json
+    active = 1 if data.get("active") else 0
+    with Database() as db:
+        db.update_channel_active(channel_id, active)
+        db.commit()
+    return json.dumps({"success": True})
+
+
+@app.route("/api/channel/<channel_id:int>/group", method="POST")
+def update_group(channel_id):
+    """Update channel group."""
+    response.content_type = "application/json"
+    data = request.json
+    group_id = data.get("group_id")
+    if group_id == "":
+        group_id = None
+    elif group_id is not None:
+        group_id = int(group_id)
+    with Database() as db:
+        db.update_channel_group(channel_id, group_id)
+        db.commit()
+    return json.dumps({"success": True})
+
+
+@app.route("/api/channel/<channel_id:int>/download_all", method="POST")
+def update_download_all(channel_id):
+    """Update channel download_all status."""
+    response.content_type = "application/json"
+    data = request.json
+    download_all = 1 if data.get("download_all") else 0
+    with Database() as db:
+        db.update_channel_download_all(channel_id, download_all)
+        db.commit()
+    return json.dumps({"success": True})
+
+
+@app.route("/api/channel/<channel_id:int>/backup_path", method="POST")
+def update_backup_path(channel_id):
+    """Update channel backup_path for local media lookup."""
+    response.content_type = "application/json"
+    data = request.json
+    backup_path = data.get("backup_path")
+    # Allow empty string or None to clear the path
+    if backup_path == "":
+        backup_path = None
+    with Database() as db:
+        db.update_channel_backup_path(channel_id, backup_path)
+        db.commit()
+    return json.dumps({"success": True})
+
+
+@app.route("/media/<filepath:path>")
+def serve_media(filepath):
+    """Serve media files with cache headers."""
+    media_dir = DATA_DIR / "media"
+    full_path = media_dir / filepath
+    if not full_path.exists():
+        logger.warning(f"Media file not found: {full_path} (filepath={filepath}, media_dir={media_dir})")
+    resp = static_file(filepath, root=str(media_dir))
+    # Cache for 1 year (immutable content)
+    resp.set_header("Cache-Control", "public, max-age=31536000, immutable")
+    return resp
+
+
+@app.route("/telegraph/css/<filepath:path>")
+def serve_telegraph_css(filepath):
+    """Serve telegraph CSS files with cache headers."""
+    css_dir = DATA_DIR / "telegraph" / "css"
+    resp = static_file(filepath, root=css_dir)
+    # Cache for 1 year (content-addressed, immutable)
+    resp.set_header("Cache-Control", "public, max-age=31536000, immutable")
+    return resp
+
+
+@app.route("/telegraph/<channel_id>/<slug>.html")
+def serve_telegraph_page(channel_id, slug):
+    """Serve downloaded telegraph HTML pages."""
+    telegraph_dir = DATA_DIR / "telegraph" / channel_id
+    resp = static_file(f"{slug}.html", root=telegraph_dir)
+    # Cache for 1 day (content may be re-downloaded if updated)
+    resp.set_header("Cache-Control", "public, max-age=86400")
+    return resp
+
+
+@app.route("/static/<filepath:path>")
+def serve_static(filepath):
+    """Serve static files with cache headers."""
+    resp = static_file(filepath, root=STATIC_DIR)
+    # Cache for 1 week
+    resp.set_header("Cache-Control", "public, max-age=604800")
+    return resp
+
+
+@app.route("/api/channel/<channel_id:int>/photo")
+def get_channel_photo(channel_id):
+    """Serve channel photo with cache headers."""
+    photos_dir = DATA_DIR / "photos"
+    photo_path = photos_dir / f"{channel_id}.jpg"
+    if photo_path.exists():
+        resp = static_file(f"{channel_id}.jpg", root=photos_dir)
+        # Cache for 1 day (photos may update)
+        resp.set_header("Cache-Control", "public, max-age=86400")
+        return resp
+    # Return a 1x1 transparent pixel if no photo
+    response.status = 404
+    return ""
+
+
+@app.route("/api/group/<group_id:int>/messages")
+def get_group_messages(group_id):
+    """Get unread messages for a group, optionally filtered to a single channel."""
+    response.content_type = "application/json"
+    limit = int(request.query.get("limit", 100))
+    channel_id = request.query.get("channel")
+    channel_id = int(channel_id) if channel_id else None
+    with Database() as db:
+        messages = db.get_unread_messages_by_group(group_id, limit, channel_id)
+        return json.dumps(messages)
+
+
+@app.route("/api/group/<group_id:int>/earlier")
+def get_earlier_messages(group_id):
+    """Get earlier (read) messages for a group, before a given date."""
+    response.content_type = "application/json"
+    before_date = int(request.query.get("before", 0))
+    limit = int(request.query.get("limit", 50))
+    channel_id = request.query.get("channel")
+    channel_id = int(channel_id) if channel_id else None
+    if before_date <= 0:
+        return json.dumps([])
+    with Database() as db:
+        messages = db.get_earlier_messages_by_group(group_id, before_date, limit, channel_id)
+        return json.dumps(messages)
+
+
+@app.route("/api/messages/read", method="POST")
+def mark_messages_read():
+    """Mark messages as read."""
+    response.content_type = "application/json"
+    total_start = time.time()
+
+    data = request.json
+    messages = data.get("messages", [])  # List of {channel_id, message_id}
+    logger.info(f"[/messages/read] Received {len(messages)} messages to mark as read")
+
+    db_start = time.time()
+    with Database() as db:
+        logger.info(f"[/messages/read] DB connection opened in {time.time() - db_start:.3f}s")
+
+        mark_start = time.time()
+        db.mark_messages_read([(m["channel_id"], m["message_id"]) for m in messages])
+        logger.info(f"[/messages/read] mark_messages_read() took {time.time() - mark_start:.3f}s")
+
+        commit_start = time.time()
+        db.commit()
+        logger.info(f"[/messages/read] commit() took {time.time() - commit_start:.3f}s")
+
+    logger.info(f"[/messages/read] Total time: {time.time() - total_start:.3f}s")
+    return json.dumps({"success": True})
+
+
+@app.route("/api/message/rate", method="POST")
+def rate_message():
+    """Set message rating."""
+    response.content_type = "application/json"
+    data = request.json
+    channel_id = int(data.get("channel_id"))
+    message_id = int(data.get("message_id"))
+    rating = int(data.get("rating", 0))  # -1, 0, or 1
+    with Database() as db:
+        db.update_message_rating(channel_id, message_id, rating)
+        db.commit()
+    return json.dumps({"success": True})
+
+
+@app.route("/api/message/bookmark", method="POST")
+def bookmark_message():
+    """Set message bookmark status."""
+    response.content_type = "application/json"
+    data = request.json
+    channel_id = int(data.get("channel_id"))
+    message_id = int(data.get("message_id"))
+    bookmarked = int(data.get("bookmarked", 0))  # 0 or 1
+    with Database() as db:
+        db.update_message_bookmark(channel_id, message_id, bookmarked)
+        db.commit()
+    return json.dumps({"success": True})
+
+
+@app.route("/api/message/<channel_id:int>/<message_id:int>")
+def get_message(channel_id, message_id):
+    """Get a single message by channel and message ID."""
+    response.content_type = "application/json"
+    with Database() as db:
+        msg = db.get_message(channel_id, message_id)
+        if msg:
+            return json.dumps(msg)
+        response.status = 404
+        return json.dumps({"error": "Message not found"})
+
+
+@app.route("/api/bookmarks")
+def get_bookmarks():
+    """Get all bookmarked messages."""
+    response.content_type = "application/json"
+    limit = int(request.query.get("limit", 100))
+    with Database() as db:
+        messages = db.get_all_bookmarked_messages(limit)
+        return json.dumps(messages)
+
+
+def main():
+    """Run the web server."""
+    print("Starting TGFeed Web UI at http://localhost:8910")
+    #app.run(host="localhost", port=8910, server="waitress")
+    app.run(host="192.168.14.23", port=8910, server="waitress")
+
+
+if __name__ == "__main__":
+    main()

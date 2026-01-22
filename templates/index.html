@@ -1,0 +1,3458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TGFeed</title>
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/static/favicon-16x16.png">
+    <link rel="manifest" href="/static/site.webmanifest">
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f5f5f5;
+            min-height: 100vh;
+        }
+
+        /* Header */
+        .header {
+            background: #2196F3;
+            color: white;
+            padding: 0 16px;
+            display: flex;
+            align-items: center;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 56px;
+            z-index: 100;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .burger-btn {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 8px;
+            margin-right: 8px;
+            border-radius: 4px;
+            flex-shrink: 0;
+        }
+
+        .burger-btn:hover {
+            background: rgba(255,255,255,0.1);
+        }
+
+        /* Group tabs */
+        .group-tabs {
+            display: flex;
+            align-items: center;
+            flex: 1;
+            overflow-x: auto;
+            gap: 4px;
+        }
+
+        .group-tab {
+            background: rgba(255,255,255,0.1);
+            border: none;
+            color: rgba(255,255,255,0.9);
+            font-size: 15px;
+            font-weight: 500;
+            padding: 8px 16px;
+            cursor: pointer;
+            border-radius: 20px;
+            white-space: nowrap;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .group-tab:hover {
+            background: rgba(255,255,255,0.2);
+            color: white;
+        }
+
+        .group-tab.active {
+            background: white;
+            color: #1976D2;
+            font-weight: 600;
+        }
+
+        .group-tab.active .group-badge {
+            background: #1976D2;
+            color: white;
+        }
+
+        .group-badge {
+            background: rgba(255,255,255,0.3);
+            color: white;
+            font-size: 12px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 10px;
+            min-width: 20px;
+            text-align: center;
+        }
+
+        .group-badge.zero {
+            display: none;
+        }
+
+        /* Sidebar */
+        .sidebar-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 200;
+        }
+
+        .sidebar-overlay.open {
+            display: block;
+        }
+
+        .sidebar {
+            position: fixed;
+            top: 0;
+            left: -800px;
+            width: 800px;
+            height: 100%;
+            background: white;
+            z-index: 300;
+            transition: left 0.3s ease;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 2px 0 8px rgba(0,0,0,0.2);
+        }
+
+        .sidebar.open {
+            left: 0;
+        }
+
+        .sidebar-header {
+            background: #1976D2;
+            color: white;
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+        }
+
+        .sidebar-tabs {
+            display: flex;
+            border-bottom: 1px solid rgba(255,255,255,0.2);
+        }
+
+        .sidebar-tab {
+            flex: 1;
+            padding: 16px;
+            background: none;
+            border: none;
+            color: rgba(255,255,255,0.7);
+            font-size: 16px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            border-bottom: 3px solid transparent;
+        }
+
+        .sidebar-tab:hover {
+            color: white;
+            background: rgba(255,255,255,0.1);
+        }
+
+        .sidebar-tab.active {
+            color: white;
+            border-bottom-color: white;
+        }
+
+        .sidebar-content {
+            display: none;
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .sidebar-content.active {
+            display: block;
+        }
+
+        .filter-box {
+            padding: 12px 16px;
+            background: #f5f5f5;
+            border-bottom: 1px solid #e0e0e0;
+            flex-shrink: 0;
+        }
+
+        .filter-input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            outline: none;
+        }
+
+        .filter-input:focus {
+            border-color: #2196F3;
+        }
+
+        .channel-item.hidden {
+            display: none;
+        }
+
+        /* Groups management */
+        .groups-list {
+            padding: 8px 0;
+        }
+
+        .group-item {
+            display: flex;
+            align-items: center;
+            padding: 12px 16px;
+            border-bottom: 1px solid #f0f0f0;
+            gap: 12px;
+        }
+
+        .group-item:hover {
+            background: #f9f9f9;
+        }
+
+        .group-item-name {
+            flex: 1;
+            font-size: 15px;
+            color: #333;
+        }
+
+        .group-item-name input {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #2196F3;
+            border-radius: 4px;
+            font-size: 15px;
+            outline: none;
+        }
+
+        .group-item-count {
+            color: #888;
+            font-size: 13px;
+        }
+
+        .group-item-actions {
+            display: flex;
+            gap: 4px;
+        }
+
+        .group-action-btn {
+            background: none;
+            border: none;
+            padding: 6px;
+            cursor: pointer;
+            border-radius: 4px;
+            color: #666;
+            font-size: 16px;
+            transition: all 0.2s;
+        }
+
+        .group-action-btn:hover {
+            background: #e0e0e0;
+            color: #333;
+        }
+
+        .group-action-btn.save {
+            color: #4CAF50;
+        }
+
+        .group-action-btn.cancel {
+            color: #f44336;
+        }
+
+        .group-action-btn.delete {
+            color: #f44336;
+        }
+
+        .group-action-btn.delete:hover {
+            background: #ffebee;
+        }
+
+        .add-group-box {
+            padding: 12px 16px;
+            background: #f5f5f5;
+            border-bottom: 1px solid #e0e0e0;
+            display: flex;
+            gap: 8px;
+        }
+
+        .add-group-input {
+            flex: 1;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            outline: none;
+        }
+
+        .add-group-input:focus {
+            border-color: #2196F3;
+        }
+
+        .add-group-btn {
+            padding: 10px 16px;
+            background: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .add-group-btn:hover {
+            background: #1976D2;
+        }
+
+        .add-group-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        /* Channel list */
+        .channel-group {
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .group-header {
+            padding: 12px 16px;
+            background: #fafafa;
+            font-weight: 500;
+            color: #666;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .channel-item {
+            display: flex;
+            align-items: center;
+            padding: 12px 16px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+        .channel-item:last-child {
+            border-bottom: none;
+        }
+
+        .channel-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: #e0e0e0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 12px;
+            font-size: 18px;
+            color: #666;
+            overflow: hidden;
+            flex-shrink: 0;
+        }
+
+        .channel-icon img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .channel-icon .fallback {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            height: 100%;
+        }
+
+        .channel-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .channel-name {
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .channel-username {
+            font-size: 12px;
+            color: #888;
+        }
+
+        .channel-controls {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* Toggle switch */
+        .toggle {
+            position: relative;
+            width: 44px;
+            height: 24px;
+        }
+
+        .toggle input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: #ccc;
+            border-radius: 24px;
+            transition: 0.3s;
+        }
+
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background: white;
+            border-radius: 50%;
+            transition: 0.3s;
+        }
+
+        .toggle input:checked + .toggle-slider {
+            background: #4CAF50;
+        }
+
+        .toggle input:checked + .toggle-slider:before {
+            transform: translateX(20px);
+        }
+
+        /* Group select */
+        .group-select {
+            padding: 4px 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 12px;
+            background: white;
+            max-width: 100px;
+        }
+
+        /* Download all checkbox */
+        .download-all-label {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            color: #666;
+            cursor: pointer;
+        }
+
+        .download-all-label input {
+            cursor: pointer;
+        }
+
+        /* Backup path input */
+        .channel-backup-path {
+            padding: 4px 8px 8px 48px;
+        }
+
+        .backup-path-input {
+            width: 100%;
+            padding: 4px 8px;
+            font-size: 11px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+
+        .backup-path-input:focus {
+            outline: none;
+            border-color: #0088cc;
+        }
+
+        .backup-path-input::placeholder {
+            color: #999;
+        }
+
+        /* Main content */
+        .main-content {
+            padding: 72px 16px 16px;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .placeholder {
+            text-align: center;
+            color: #888;
+            padding: 40px;
+        }
+
+        /* Feed styles */
+        .feed {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .message-card {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .message-header {
+            display: flex;
+            align-items: center;
+            padding: 12px 16px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+        .message-channel-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: #e0e0e0;
+            margin-right: 12px;
+            overflow: hidden;
+            flex-shrink: 0;
+        }
+
+        .message-channel-icon img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .message-channel-info {
+            flex: 1;
+        }
+
+        .message-channel-name {
+            font-weight: 500;
+            font-size: 14px;
+        }
+
+        .message-date {
+            font-size: 12px;
+            color: #888;
+        }
+
+        .message-body {
+            padding: 16px;
+        }
+
+        .message-text {
+            white-space: pre-wrap;
+            word-break: break-word;
+            line-height: 1.5;
+        }
+
+        .message-text a {
+            color: #2196F3;
+            text-decoration: none;
+        }
+
+        .message-text a:hover {
+            text-decoration: underline;
+        }
+
+        .message-media {
+            margin-top: 12px;
+        }
+
+        .message-media img {
+            max-width: 100%;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        /* Image lightbox */
+        .image-lightbox {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.95);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+            cursor: pointer;
+        }
+
+        .image-lightbox.open {
+            display: flex;
+        }
+
+        .image-lightbox img {
+            max-width: 95vw;
+            max-height: 95vh;
+            object-fit: contain;
+            border-radius: 4px;
+            cursor: default;
+        }
+
+        .lightbox-close {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            background: rgba(255, 255, 255, 0.2);
+            border: none;
+            color: white;
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            font-size: 28px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
+        }
+
+        .lightbox-close:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        .message-media video {
+            max-width: 100%;
+            border-radius: 4px;
+        }
+
+        .message-media video.vertical-video {
+            max-width: 50%;
+        }
+
+        /* Video thumbnail */
+        .video-thumbnail-container {
+            position: relative;
+            cursor: pointer;
+            display: inline-block;
+        }
+
+        .video-thumbnail {
+            max-width: 100%;
+            border-radius: 4px;
+        }
+
+        .video-play-overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 60px;
+            height: 60px;
+            background: rgba(0, 0, 0, 0.7);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 24px;
+            pointer-events: none;
+            transition: background 0.2s;
+        }
+
+        .video-thumbnail-container:hover .video-play-overlay {
+            background: rgba(0, 0, 0, 0.85);
+        }
+
+        /* File attachment */
+        .file-attachment {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px;
+            background: #f5f5f5;
+            border-radius: 8px;
+            margin-top: 12px;
+            text-decoration: none;
+            color: inherit;
+            transition: background 0.2s;
+        }
+
+        .file-attachment:hover {
+            background: #eeeeee;
+        }
+
+        .file-icon {
+            width: 40px;
+            height: 40px;
+            background: #2196F3;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 18px;
+            flex-shrink: 0;
+        }
+
+        .file-icon.audio {
+            background: #9C27B0;
+        }
+
+        .file-icon.voice {
+            background: #4CAF50;
+        }
+
+        .file-icon.document {
+            background: #FF9800;
+        }
+
+        .file-icon.sticker {
+            background: #E91E63;
+        }
+
+        /* Duplicate message styling */
+        .message-duplicate .message-card {
+            opacity: 0.6;
+            border-left: 3px solid #ff9800;
+        }
+
+        .message-duplicate .message-body {
+            max-height: 80px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .message-duplicate .message-body::after {
+            content: "";
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 30px;
+            background: linear-gradient(transparent, white);
+            pointer-events: none;
+        }
+
+        .message-duplicate:hover .message-card {
+            opacity: 1;
+        }
+
+        .message-duplicate:hover .message-body {
+            max-height: none;
+        }
+
+        .message-duplicate:hover .message-body::after {
+            display: none;
+        }
+
+        .duplicate-indicator {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 8px;
+            background: #fff3e0;
+            border-radius: 4px;
+            font-size: 11px;
+            color: #e65100;
+            margin-bottom: 8px;
+        }
+
+        .duplicate-icon {
+            font-size: 12px;
+        }
+
+        .file-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .file-name {
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .file-type {
+            font-size: 12px;
+            color: #888;
+            text-transform: uppercase;
+        }
+
+        /* Album grid for multiple media */
+        .media-grid {
+            display: grid;
+            gap: 4px;
+            margin-top: 12px;
+        }
+
+        .media-grid.grid-2 {
+            grid-template-columns: repeat(2, 1fr);
+        }
+
+        .media-grid.grid-3 {
+            grid-template-columns: repeat(3, 1fr);
+        }
+
+        .media-grid.grid-4 {
+            grid-template-columns: repeat(2, 1fr);
+        }
+
+        .media-grid-item {
+            position: relative;
+            overflow: hidden;
+            border-radius: 4px;
+            background: #f0f0f0;
+        }
+
+        .media-grid-item img,
+        .media-grid-item video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+
+        .media-grid.grid-2 .media-grid-item,
+        .media-grid.grid-3 .media-grid-item,
+        .media-grid.grid-4 .media-grid-item {
+            aspect-ratio: 1;
+        }
+
+        .media-grid-item .video-indicator {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 48px;
+            height: 48px;
+            background: rgba(0,0,0,0.6);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 20px;
+        }
+
+        .album-badge {
+            display: inline-block;
+            background: #e3f2fd;
+            color: #1976D2;
+            font-size: 11px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin-left: 8px;
+        }
+
+        .message-stats {
+            display: flex;
+            gap: 16px;
+            padding: 8px 16px;
+            border-top: 1px solid #f0f0f0;
+            font-size: 12px;
+            color: #888;
+        }
+
+        .no-messages {
+            text-align: center;
+            color: #888;
+            padding: 60px 20px;
+        }
+
+        .load-earlier-btn {
+            margin-top: 16px;
+            padding: 12px 24px;
+            background: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .load-earlier-btn:hover {
+            background: #1976D2;
+        }
+
+        .load-earlier-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        /* Loading indicator for earlier messages */
+        .loading-earlier {
+            text-align: center;
+            padding: 16px;
+            color: #888;
+            font-size: 14px;
+        }
+
+        /* Message with action buttons container */
+        .message-row {
+            display: flex;
+            gap: 8px;
+            align-items: flex-start;
+            position: relative;
+        }
+
+        .message-row .message-card {
+            flex: 1;
+            min-width: 0;
+        }
+
+        /* Skip to next message button (floating on left) */
+        .skip-btn {
+            position: sticky;
+            top: 72px;
+            width: 32px;
+            height: 32px;
+            border: none;
+            border-radius: 50%;
+            background: white;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            color: #888;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+            transition: all 0.2s;
+            flex-shrink: 0;
+            z-index: 10;
+            margin-top: 12px;
+        }
+
+        .skip-btn:hover {
+            background: #2196F3;
+            color: white;
+            transform: scale(1.1);
+        }
+
+        /* Action buttons on the right */
+        .message-actions {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            padding-top: 12px;
+            flex-shrink: 0;
+        }
+
+        .action-btn {
+            width: 36px;
+            height: 36px;
+            border: none;
+            border-radius: 50%;
+            background: white;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            color: #888;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            transition: all 0.2s;
+        }
+
+        .action-btn:hover {
+            background: #f5f5f5;
+        }
+
+        .action-btn.active {
+            color: white;
+        }
+
+        .action-btn.thumb-up.active {
+            background: #4CAF50;
+        }
+
+        .action-btn.thumb-down.active {
+            background: #f44336;
+        }
+
+        .action-btn.bookmark.active {
+            background: #FF9800;
+            color: white;
+        }
+
+        .action-btn.bookmark.active .bookmark-icon {
+            fill: white;
+            stroke: white;
+        }
+
+        /* Bookmark header button */
+        .header-bookmark-btn {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 20px;
+            cursor: pointer;
+            padding: 8px;
+            border-radius: 4px;
+            margin-left: auto;
+            flex-shrink: 0;
+        }
+
+        .header-bookmark-btn:hover {
+            background: rgba(255,255,255,0.1);
+        }
+
+        .header-bookmark-btn.active {
+            background: rgba(255,255,255,0.2);
+        }
+
+        .header-bookmark-btn.active .bookmark-icon {
+            fill: white;
+        }
+
+        /* Channel stats */
+        .channel-stats {
+            display: flex;
+            gap: 8px;
+            font-size: 11px;
+            margin-top: 2px;
+        }
+
+        .channel-stat {
+            display: flex;
+            align-items: center;
+            gap: 2px;
+            color: #888;
+        }
+
+        .channel-stat.unread {
+            color: #2196F3;
+            font-weight: 500;
+        }
+
+        .channel-stat.bookmarked {
+            color: #FF9800;
+        }
+
+        .channel-stat.likes {
+            color: #4CAF50;
+        }
+
+        .channel-stat.dislikes {
+            color: #f44336;
+        }
+
+        /* Clickable channel names */
+        .channel-name-link {
+            color: inherit;
+            text-decoration: none;
+            cursor: pointer;
+        }
+
+        .channel-name-link:hover {
+            color: #2196F3;
+            text-decoration: underline;
+        }
+
+        /* Selected channel indicator */
+        .channel-item.selected {
+            background: #e3f2fd;
+        }
+
+        /* Clear filter button in header */
+        .clear-filter-btn {
+            background: rgba(255,255,255,0.2);
+            border: none;
+            color: white;
+            font-size: 12px;
+            padding: 4px 12px;
+            border-radius: 12px;
+            cursor: pointer;
+            margin-left: 8px;
+            white-space: nowrap;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .clear-filter-btn:hover {
+            background: rgba(255,255,255,0.3);
+        }
+
+        /* Audio player with filename */
+        .audio-player {
+            margin-top: 12px;
+            background: #f5f5f5;
+            border-radius: 8px;
+            padding: 12px;
+        }
+
+        .audio-filename {
+            font-size: 13px;
+            font-weight: 500;
+            margin-bottom: 8px;
+            color: #333;
+            word-break: break-word;
+        }
+
+        /* Telegraph preview */
+        .telegraph-preview {
+            margin-top: 12px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            overflow: hidden;
+            background: white;
+        }
+
+        .telegraph-iframe-container {
+            position: relative;
+            height: 600px;
+            overflow: hidden;
+        }
+
+        .telegraph-iframe-container::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 80px;
+            background: linear-gradient(transparent, white);
+            pointer-events: none;
+        }
+
+        .telegraph-iframe-container.expanded {
+            height: auto;
+        }
+
+        .telegraph-iframe-container.expanded::after {
+            display: none;
+        }
+
+        .telegraph-iframe {
+            width: 100%;
+            height: 800px;
+            border: none;
+            pointer-events: none;
+        }
+
+        .telegraph-iframe-container.expanded .telegraph-iframe {
+            height: auto;
+            min-height: 400px;
+            pointer-events: auto;
+        }
+
+        .telegraph-actions {
+            display: flex;
+            gap: 8px;
+            padding: 12px;
+            border-top: 1px solid #e0e0e0;
+            background: #fafafa;
+        }
+
+        .telegraph-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 16px;
+            background: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            text-decoration: none;
+        }
+
+        .telegraph-btn:hover {
+            background: #1976D2;
+        }
+
+        .telegraph-btn.secondary {
+            background: #757575;
+        }
+
+        .telegraph-btn.secondary:hover {
+            background: #616161;
+        }
+
+        /* YouTube embed */
+        .youtube-embed {
+            margin-top: 12px;
+            border-radius: 8px;
+            overflow: hidden;
+            background: #000;
+        }
+
+        .youtube-embed iframe {
+            width: 100%;
+            aspect-ratio: 16 / 9;
+            border: none;
+        }
+
+        /* Reply quote */
+        .message-reply {
+            margin-bottom: 12px;
+            padding: 8px 12px;
+            background: #f5f5f5;
+            border-left: 3px solid #2196F3;
+            border-radius: 0 4px 4px 0;
+            font-size: 13px;
+            color: #555;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .message-reply:hover {
+            background: #e8e8e8;
+        }
+
+        .message-reply-header {
+            font-weight: 500;
+            color: #2196F3;
+            margin-bottom: 4px;
+            font-size: 12px;
+        }
+
+        .message-reply-content {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .message-reply-text {
+            line-height: 1.4;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .message-reply-loading {
+            color: #888;
+            font-style: italic;
+        }
+
+        .message-reply-media-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            color: #888;
+            font-style: italic;
+        }
+
+        .message-reply-media img {
+            max-width: 100%;
+            border-radius: 4px;
+            margin-top: 4px;
+        }
+
+        .message-reply-media video {
+            max-width: 100%;
+            border-radius: 4px;
+            margin-top: 4px;
+        }
+
+        .message-reply-media audio {
+            width: 100%;
+            margin-top: 4px;
+        }
+
+        /* Bookmark SVG icon */
+        .bookmark-icon {
+            width: 20px;
+            height: 20px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .bookmark-icon.filled {
+            fill: currentColor;
+        }
+
+        .action-btn .bookmark-icon {
+            width: 18px;
+            height: 18px;
+        }
+
+        /* Mobile responsive styles */
+        @media (max-width: 768px) {
+            .message-row {
+                position: relative;
+            }
+
+            .message-row .message-card {
+                width: 100%;
+            }
+
+            /* Skip button floating on left - same as desktop but with overlay style */
+            .skip-btn {
+                position: sticky;
+                top: 72px;
+                left: 8px;
+                background: rgba(255, 255, 255, 0.85);
+                opacity: 0.6;
+                z-index: 20;
+                margin-left: -40px;
+                margin-right: 8px;
+            }
+
+            .skip-btn:hover, .skip-btn:active {
+                opacity: 1;
+                background: #2196F3;
+                color: white;
+                transform: scale(1.1);
+            }
+
+            /* Action buttons at top right, overlaying the message */
+            .message-actions {
+                position: absolute;
+                right: 8px;
+                top: 12px;
+                padding-top: 0;
+                z-index: 20;
+            }
+
+            .message-actions .action-btn {
+                background: rgba(255, 255, 255, 0.85);
+                opacity: 0.6;
+            }
+
+            .message-actions .action-btn:hover,
+            .message-actions .action-btn:active {
+                opacity: 1;
+            }
+
+            .message-actions .action-btn.active {
+                opacity: 1;
+            }
+
+            /* Ensure message card takes full width */
+            .main-content {
+                padding: 64px 8px 16px 8px;
+            }
+
+            .messages-container {
+                gap: 12px;
+            }
+        }
+
+        /* Smaller screens */
+        @media (max-width: 480px) {
+            .header {
+                padding: 0 8px;
+            }
+
+            .group-tab {
+                padding: 6px 12px;
+                font-size: 14px;
+            }
+
+            .group-badge {
+                padding: 1px 6px;
+                font-size: 11px;
+            }
+
+            .message-card {
+                border-radius: 8px;
+            }
+
+            .message-header {
+                padding: 12px;
+            }
+
+            .message-body {
+                padding: 0 12px 12px;
+            }
+
+            .message-channel-icon {
+                width: 36px;
+                height: 36px;
+            }
+
+            .message-channel-name {
+                font-size: 13px;
+            }
+
+            .message-date {
+                font-size: 11px;
+            }
+
+            .action-btn {
+                width: 32px;
+                height: 32px;
+                font-size: 16px;
+            }
+
+            .skip-btn {
+                width: 28px;
+                height: 28px;
+                font-size: 14px;
+            }
+        }
+
+        /* Debug mode styles */
+        .debug-info {
+            display: none;
+            background: #1a1a2e;
+            color: #00ff88;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 11px;
+            padding: 8px 12px;
+            margin: 8px 0;
+            border-radius: 4px;
+            border-left: 3px solid #00ff88;
+        }
+
+        body.debug-mode .debug-info {
+            display: block;
+        }
+
+        .debug-info .debug-row {
+            display: flex;
+            margin: 2px 0;
+        }
+
+        .debug-info .debug-label {
+            color: #888;
+            min-width: 120px;
+        }
+
+        .debug-info .debug-value {
+            color: #00ff88;
+            word-break: break-all;
+        }
+
+        .debug-info .debug-value.ai-summary {
+            color: #ffcc00;
+            font-style: italic;
+        }
+
+        .debug-info .debug-value.duplicate {
+            color: #ff6b6b;
+        }
+
+        .debug-channel-id {
+            display: none;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 10px;
+            color: #888;
+            margin-left: 6px;
+        }
+
+        body.debug-mode .debug-channel-id {
+            display: inline;
+        }
+
+        /* Debug mode indicator */
+        .debug-indicator {
+            display: none;
+            position: fixed;
+            bottom: 16px;
+            right: 16px;
+            background: #1a1a2e;
+            color: #00ff88;
+            padding: 8px 16px;
+            border-radius: 4px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 12px;
+            z-index: 1000;
+            border: 1px solid #00ff88;
+        }
+
+        body.debug-mode .debug-indicator {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <!-- Debug mode indicator -->
+    <div class="debug-indicator">DEBUG MODE (Ctrl+D to toggle)</div>
+
+    <header class="header">
+        <button class="burger-btn" id="burgerBtn">&#9776;</button>
+        <div class="group-tabs" id="groupTabs"></div>
+        <button class="header-bookmark-btn" id="bookmarkBtn" title="Bookmarks">
+            <svg class="bookmark-icon" viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>
+        </button>
+    </header>
+
+    <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+    <!-- Image lightbox -->
+    <div class="image-lightbox" id="imageLightbox">
+        <button class="lightbox-close" id="lightboxClose">&times;</button>
+        <img id="lightboxImage" src="" alt="">
+    </div>
+
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <div class="sidebar-tabs">
+                <button class="sidebar-tab active" data-tab="channels">Channels</button>
+                <button class="sidebar-tab" data-tab="groups">Groups</button>
+            </div>
+        </div>
+
+        <!-- Filter box - always visible -->
+        <div class="filter-box">
+            <input type="text" class="filter-input" id="filterInput" placeholder="Filter...">
+        </div>
+
+        <!-- Channels Tab Content -->
+        <div class="sidebar-content active" id="channelsTab">
+            <div id="channelList"></div>
+        </div>
+
+        <!-- Groups Tab Content -->
+        <div class="sidebar-content" id="groupsTab">
+            <div class="add-group-box">
+                <input type="text" class="add-group-input" id="newGroupInput" placeholder="New group name...">
+                <button class="add-group-btn" id="addGroupBtn">Add</button>
+            </div>
+            <div class="groups-list" id="groupsList"></div>
+        </div>
+    </aside>
+
+    <main class="main-content" id="mainContent">
+        <div class="placeholder">
+            <p>Select a group from the header to view messages</p>
+        </div>
+    </main>
+
+    <script>
+        const burgerBtn = document.getElementById('burgerBtn');
+        const sidebar = document.getElementById('sidebar');
+        const sidebarOverlay = document.getElementById('sidebarOverlay');
+        const channelList = document.getElementById('channelList');
+        const filterInput = document.getElementById('filterInput');
+        const groupTabs = document.getElementById('groupTabs');
+        const mainContent = document.getElementById('mainContent');
+        const bookmarkBtn = document.getElementById('bookmarkBtn');
+        const sidebarTabs = document.querySelectorAll('.sidebar-tab');
+        const channelsTab = document.getElementById('channelsTab');
+        const groupsTab = document.getElementById('groupsTab');
+        const groupsList = document.getElementById('groupsList');
+        const newGroupInput = document.getElementById('newGroupInput');
+        const addGroupBtn = document.getElementById('addGroupBtn');
+
+        let channels = [];
+        let groups = [];
+        let editingGroupId = null;  // Track which group is being edited
+        let currentGroupId = null;
+        let currentChannelId = null;  // Filter to single channel
+        let showingBookmarks = false;
+        let messages = [];
+        let readMessages = new Set();
+        let earliestDate = null;
+        let loadingEarlier = false;
+        let noMoreEarlierMessages = false;
+
+        // URL parameter handling
+        function updateUrl() {
+            const params = new URLSearchParams();
+            if (currentGroupId) params.set('group', currentGroupId);
+            if (currentChannelId) params.set('channel', currentChannelId);
+            if (showingBookmarks) params.set('bookmarks', '1');
+            const newUrl = params.toString() ? `?${params.toString()}` : window.location.pathname;
+            history.replaceState(null, '', newUrl);
+        }
+
+        function loadFromUrl() {
+            const params = new URLSearchParams(window.location.search);
+            const groupId = params.get('group');
+            const channelId = params.get('channel');
+            const bookmarks = params.get('bookmarks');
+
+            if (bookmarks === '1') {
+                loadBookmarks();
+            } else if (groupId) {
+                currentGroupId = parseInt(groupId);
+                currentChannelId = channelId ? parseInt(channelId) : null;
+                loadGroupMessages(currentGroupId);
+                renderGroupTabs();
+            }
+        }
+
+        // Apply current filter to channel list
+        function applyChannelFilter() {
+            const filter = filterInput.value.toLowerCase();
+            document.querySelectorAll('.channel-item').forEach(item => {
+                const name = item.querySelector('.channel-name').textContent.toLowerCase();
+                const username = item.querySelector('.channel-username').textContent.toLowerCase();
+                if (name.includes(filter) || username.includes(filter)) {
+                    item.classList.remove('hidden');
+                } else {
+                    item.classList.add('hidden');
+                }
+            });
+        }
+
+        // Filter channels on input
+        filterInput.addEventListener('input', applyChannelFilter);
+
+        // Toggle sidebar
+        function toggleSidebar() {
+            const isOpening = !sidebar.classList.contains('open');
+            sidebar.classList.toggle('open');
+            sidebarOverlay.classList.toggle('open');
+
+            // When opening sidebar with a channel filter active, populate the filter input
+            if (isOpening && currentChannelId) {
+                const channel = channels.find(c => c.id === currentChannelId);
+                if (channel) {
+                    filterInput.value = channel.title;
+                    applyChannelFilter();
+                }
+            }
+        }
+
+        burgerBtn.addEventListener('click', toggleSidebar);
+        sidebarOverlay.addEventListener('click', toggleSidebar);
+
+        // Image lightbox
+        const imageLightbox = document.getElementById('imageLightbox');
+        const lightboxImage = document.getElementById('lightboxImage');
+        const lightboxClose = document.getElementById('lightboxClose');
+
+        function openLightbox(src) {
+            lightboxImage.src = src;
+            imageLightbox.classList.add('open');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeLightbox() {
+            imageLightbox.classList.remove('open');
+            lightboxImage.src = '';
+            document.body.style.overflow = '';
+        }
+
+        lightboxClose.addEventListener('click', (e) => {
+            e.stopPropagation();
+            closeLightbox();
+        });
+
+        imageLightbox.addEventListener('click', (e) => {
+            if (e.target === imageLightbox) {
+                closeLightbox();
+            }
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && imageLightbox.classList.contains('open')) {
+                closeLightbox();
+            }
+        });
+
+        // Debug mode toggle (Ctrl+D)
+        document.addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.key === 'd') {
+                e.preventDefault();
+                document.body.classList.toggle('debug-mode');
+            }
+        });
+
+        // Delegate click events for message media images (not video thumbnails)
+        document.addEventListener('click', (e) => {
+            const img = e.target.closest('.message-media img');
+            if (img && !img.classList.contains('video-thumbnail')) {
+                e.preventDefault();
+                openLightbox(img.src);
+            }
+        });
+
+        // Delegate click events for video thumbnails - replace with video player
+        document.addEventListener('click', (e) => {
+            const container = e.target.closest('.video-thumbnail-container');
+            if (container) {
+                e.preventDefault();
+                const videoSrc = container.dataset.videoSrc;
+                // Replace thumbnail with video player that autoplays
+                container.outerHTML = `<video src="${videoSrc}" controls muted autoplay preload="metadata" onloadedmetadata="handleVideoMetadata(this)"></video>`;
+            }
+        });
+
+        // Handle vertical video detection - reduce width for tall videos
+        function handleVideoMetadata(video) {
+            if (video.videoHeight > video.videoWidth) {
+                video.classList.add('vertical-video');
+            }
+        }
+        // Make it globally accessible for inline onloadedmetadata
+        window.handleVideoMetadata = handleVideoMetadata;
+
+        // Sidebar tab switching
+        sidebarTabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                const tabName = tab.dataset.tab;
+                sidebarTabs.forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+
+                if (tabName === 'channels') {
+                    channelsTab.classList.add('active');
+                    groupsTab.classList.remove('active');
+                } else {
+                    channelsTab.classList.remove('active');
+                    groupsTab.classList.add('active');
+                    renderGroupsList();
+                }
+            });
+        });
+
+        // Add group button
+        addGroupBtn.addEventListener('click', createNewGroup);
+        newGroupInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') createNewGroup();
+        });
+
+        async function createNewGroup() {
+            const name = newGroupInput.value.trim();
+            if (!name) return;
+
+            addGroupBtn.disabled = true;
+            try {
+                const res = await fetch('/api/group', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name })
+                });
+                if (res.ok) {
+                    newGroupInput.value = '';
+                    await loadData();
+                    renderGroupsList();
+                }
+            } finally {
+                addGroupBtn.disabled = false;
+            }
+        }
+
+        function renderGroupsList() {
+            let html = '';
+            groups.forEach(group => {
+                const isEditing = editingGroupId === group.id;
+                const channelCount = group.channel_count || 0;
+
+                if (isEditing) {
+                    html += `
+                        <div class="group-item" data-group-id="${group.id}">
+                            <div class="group-item-name">
+                                <input type="text" value="${escapeHtml(group.name)}" class="edit-group-input" autofocus>
+                            </div>
+                            <div class="group-item-actions">
+                                <button class="group-action-btn save" title="Save">&#10003;</button>
+                                <button class="group-action-btn cancel" title="Cancel">&#10005;</button>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    html += `
+                        <div class="group-item" data-group-id="${group.id}">
+                            <div class="group-item-name">${escapeHtml(group.name)}</div>
+                            <div class="group-item-count">${channelCount} channel${channelCount !== 1 ? 's' : ''}</div>
+                            <div class="group-item-actions">
+                                <button class="group-action-btn edit" title="Rename">&#9998;</button>
+                                <button class="group-action-btn delete" title="Delete">&#128465;</button>
+                            </div>
+                        </div>
+                    `;
+                }
+            });
+
+            if (groups.length === 0) {
+                html = '<div style="padding: 20px; text-align: center; color: #888;">No groups yet. Create one above.</div>';
+            }
+
+            groupsList.innerHTML = html;
+
+            // Add event listeners
+            groupsList.querySelectorAll('.group-action-btn.edit').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const groupId = parseInt(btn.closest('.group-item').dataset.groupId);
+                    editingGroupId = groupId;
+                    renderGroupsList();
+                    // Focus the input
+                    const input = groupsList.querySelector('.edit-group-input');
+                    if (input) {
+                        input.focus();
+                        input.select();
+                    }
+                });
+            });
+
+            groupsList.querySelectorAll('.group-action-btn.save').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    const groupItem = btn.closest('.group-item');
+                    const groupId = parseInt(groupItem.dataset.groupId);
+                    const input = groupItem.querySelector('.edit-group-input');
+                    const newName = input.value.trim();
+                    if (newName) {
+                        await renameGroup(groupId, newName);
+                    }
+                    editingGroupId = null;
+                    renderGroupsList();
+                });
+            });
+
+            groupsList.querySelectorAll('.group-action-btn.cancel').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    editingGroupId = null;
+                    renderGroupsList();
+                });
+            });
+
+            groupsList.querySelectorAll('.edit-group-input').forEach(input => {
+                input.addEventListener('keypress', async (e) => {
+                    if (e.key === 'Enter') {
+                        const groupItem = input.closest('.group-item');
+                        const groupId = parseInt(groupItem.dataset.groupId);
+                        const newName = input.value.trim();
+                        if (newName) {
+                            await renameGroup(groupId, newName);
+                        }
+                        editingGroupId = null;
+                        renderGroupsList();
+                    }
+                });
+                input.addEventListener('keydown', (e) => {
+                    if (e.key === 'Escape') {
+                        editingGroupId = null;
+                        renderGroupsList();
+                    }
+                });
+            });
+
+            groupsList.querySelectorAll('.group-action-btn.delete').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    const groupItem = btn.closest('.group-item');
+                    const groupId = parseInt(groupItem.dataset.groupId);
+                    const group = groups.find(g => g.id === groupId);
+                    if (confirm(`Delete group "${group.name}"? Channels will be unassigned but not deleted.`)) {
+                        await deleteGroup(groupId);
+                    }
+                });
+            });
+        }
+
+        async function renameGroup(groupId, name) {
+            try {
+                const res = await fetch(`/api/group/${groupId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name })
+                });
+                if (res.ok) {
+                    await loadData();
+                }
+            } catch (e) {
+                console.error('Failed to rename group:', e);
+            }
+        }
+
+        async function deleteGroup(groupId) {
+            try {
+                const res = await fetch(`/api/group/${groupId}`, {
+                    method: 'DELETE'
+                });
+                if (res.ok) {
+                    // If we were viewing this group, clear selection
+                    if (currentGroupId === groupId) {
+                        currentGroupId = null;
+                        updateUrl();
+                    }
+                    await loadData();
+                    renderGroupsList();
+                }
+            } catch (e) {
+                console.error('Failed to delete group:', e);
+            }
+        }
+
+        // Load data
+        async function loadData() {
+            const [channelsRes, groupsRes] = await Promise.all([
+                fetch('/api/channels'),
+                fetch('/api/groups')
+            ]);
+            channels = await channelsRes.json();
+            groups = await groupsRes.json();
+            renderChannels();
+            renderGroupTabs();
+        }
+
+        // Calculate unread counts per group
+        function getGroupUnreadCounts() {
+            const counts = {};
+            groups.forEach(group => {
+                counts[group.id] = 0;
+            });
+
+            channels.forEach(channel => {
+                if (channel.group_id && channel.stats && channel.stats.unread) {
+                    counts[channel.group_id] = (counts[channel.group_id] || 0) + channel.stats.unread;
+                }
+            });
+
+            return counts;
+        }
+
+        // Render group tabs in header
+        function renderGroupTabs() {
+            const unreadCounts = getGroupUnreadCounts();
+            let html = '';
+            groups.forEach(group => {
+                const activeClass = currentGroupId === group.id && !showingBookmarks ? 'active' : '';
+                const unread = unreadCounts[group.id] || 0;
+                const badgeClass = unread === 0 ? 'group-badge zero' : 'group-badge';
+                html += `<button class="group-tab ${activeClass}" data-group-id="${group.id}">
+                    ${escapeHtml(group.name)}
+                    <span class="${badgeClass}">${unread}</span>
+                </button>`;
+            });
+
+            // Show clear filter button if a channel is selected
+            if (currentChannelId) {
+                const channel = channels.find(c => c.id === currentChannelId);
+                const channelName = channel ? channel.title : 'Channel';
+                html += `<button class="clear-filter-btn" id="clearFilterBtn">&times; ${escapeHtml(channelName)}</button>`;
+            }
+
+            groupTabs.innerHTML = html;
+
+            // Update bookmark button state
+            bookmarkBtn.classList.toggle('active', showingBookmarks);
+
+            // Add click handlers
+            document.querySelectorAll('.group-tab').forEach(tab => {
+                tab.addEventListener('click', () => selectGroup(parseInt(tab.dataset.groupId)));
+            });
+
+            // Clear filter button handler
+            const clearBtn = document.getElementById('clearFilterBtn');
+            if (clearBtn) {
+                clearBtn.addEventListener('click', clearChannelFilter);
+            }
+        }
+
+        // Load bookmarks
+        async function loadBookmarks() {
+            showingBookmarks = true;
+            currentGroupId = null;
+            currentChannelId = null;
+            renderGroupTabs();
+            updateUrl();
+            mainContent.innerHTML = '<div class="placeholder"><p>Loading bookmarks...</p></div>';
+
+            try {
+                const res = await fetch('/api/bookmarks?limit=100');
+                messages = await res.json();
+                renderFeed();
+            } catch (e) {
+                mainContent.innerHTML = '<div class="placeholder"><p>Error loading bookmarks</p></div>';
+            }
+        }
+
+        // Bookmark header button click
+        bookmarkBtn.addEventListener('click', loadBookmarks);
+
+        // Select a group and load its messages
+        async function selectGroup(groupId, channelId = null) {
+            showingBookmarks = false;
+            currentGroupId = groupId;
+            currentChannelId = channelId;
+            renderGroupTabs();
+            renderChannels();  // Update selected state
+            updateUrl();
+            await loadGroupMessages(groupId);
+        }
+
+        // Select a specific channel within a group
+        async function selectChannel(channelId) {
+            // Find the channel's group
+            const channel = channels.find(c => c.id === channelId);
+            if (!channel) return;
+
+            const groupId = channel.group_id || null;
+            if (!groupId) {
+                // Channel has no group, can't filter
+                return;
+            }
+
+            showingBookmarks = false;
+            currentGroupId = groupId;
+            currentChannelId = channelId;
+            renderGroupTabs();
+            renderChannels();
+            // Close sidebar only if it's open
+            if (sidebar.classList.contains('open')) {
+                toggleSidebar();
+            }
+            updateUrl();
+            await loadGroupMessages(groupId);
+        }
+
+        // Clear channel filter
+        function clearChannelFilter() {
+            if (currentGroupId) {
+                selectGroup(currentGroupId, null);
+            }
+        }
+
+        // Load messages for a group
+        async function loadGroupMessages(groupId) {
+            mainContent.innerHTML = '<div class="placeholder"><p>Loading messages...</p></div>';
+            earliestDate = null;
+            noMoreEarlierMessages = false;
+
+            try {
+                let url = `/api/group/${groupId}/messages?limit=100`;
+                if (currentChannelId) {
+                    url += `&channel=${currentChannelId}`;
+                }
+                const res = await fetch(url);
+                messages = await res.json();
+                updateEarliestDate();
+                renderFeed();
+            } catch (e) {
+                mainContent.innerHTML = '<div class="placeholder"><p>Error loading messages</p></div>';
+            }
+        }
+
+        // Update earliest date from current messages
+        function updateEarliestDate() {
+            if (messages.length > 0) {
+                earliestDate = Math.min(...messages.map(m => m.date || Infinity));
+            }
+        }
+
+        // Load earlier messages (triggered by scroll)
+        async function loadEarlierMessages() {
+            if (!currentGroupId || !earliestDate || loadingEarlier || showingBookmarks || noMoreEarlierMessages) return;
+
+            loadingEarlier = true;
+
+            // Show loading indicator at top
+            const feed = document.querySelector('.feed');
+            const loadingEl = document.createElement('div');
+            loadingEl.className = 'loading-earlier';
+            loadingEl.textContent = 'Loading...';
+            if (feed) {
+                feed.insertBefore(loadingEl, feed.firstChild);
+            }
+
+            try {
+                let url = `/api/group/${currentGroupId}/earlier?before=${earliestDate}&limit=10`;
+                if (currentChannelId) {
+                    url += `&channel=${currentChannelId}`;
+                }
+                const res = await fetch(url);
+                const earlierMessages = await res.json();
+
+                // Remove loading indicator
+                loadingEl.remove();
+
+                if (earlierMessages.length > 0) {
+                    // Dedupe: filter out any messages already in the list
+                    const existingIds = new Set(messages.map(m => `${m.channel_id}-${m.id}`));
+                    const newMessages = earlierMessages.filter(m => !existingIds.has(`${m.channel_id}-${m.id}`));
+
+                    if (newMessages.length > 0) {
+                        // Prepend earlier messages (they are older, so go at the top)
+                        messages = [...newMessages, ...messages];
+                        updateEarliestDate();
+                        renderFeedPrepend(newMessages.length);
+                    } else {
+                        noMoreEarlierMessages = true;
+                    }
+                } else {
+                    noMoreEarlierMessages = true;
+                }
+            } catch (e) {
+                console.error('Failed to load earlier messages:', e);
+                loadingEl.remove();
+            } finally {
+                loadingEarlier = false;
+            }
+        }
+
+        // Load earlier messages manually (when clicking the button on empty feed)
+        async function loadEarlierMessagesManual() {
+            if (!currentGroupId || loadingEarlier || showingBookmarks) return;
+
+            const btn = document.getElementById('loadEarlierBtn');
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = 'Loading...';
+            }
+
+            loadingEarlier = true;
+
+            try {
+                // Get the most recent message date to load messages before it
+                // Since we have no messages, we need to get messages without a "before" filter
+                let url = `/api/group/${currentGroupId}/earlier?before=${Math.floor(Date.now() / 1000) + 86400}&limit=50`;
+                if (currentChannelId) {
+                    url += `&channel=${currentChannelId}`;
+                }
+                const res = await fetch(url);
+                const earlierMessages = await res.json();
+
+                if (earlierMessages.length > 0) {
+                    messages = earlierMessages;
+                    updateEarliestDate();
+                    renderFeed();
+                    // Scroll to bottom so user sees the most recent message and can scroll up
+                    // Wait for images to load to get accurate scroll height
+                    const images = mainContent.querySelectorAll('img');
+                    if (images.length > 0) {
+                        let loadedCount = 0;
+                        const totalImages = images.length;
+                        const scrollToBottom = () => {
+                            window.scrollTo(0, document.documentElement.scrollHeight);
+                        };
+                        const onImageLoad = () => {
+                            loadedCount++;
+                            if (loadedCount >= totalImages) {
+                                scrollToBottom();
+                            }
+                        };
+                        images.forEach(img => {
+                            if (img.complete) {
+                                loadedCount++;
+                            } else {
+                                img.addEventListener('load', onImageLoad, { once: true });
+                                img.addEventListener('error', onImageLoad, { once: true });
+                            }
+                        });
+                        // If all images already loaded, scroll now
+                        if (loadedCount >= totalImages) {
+                            setTimeout(scrollToBottom, 50);
+                        }
+                        // Fallback: scroll after 500ms anyway in case some images are slow
+                        setTimeout(scrollToBottom, 500);
+                    } else {
+                        setTimeout(() => {
+                            window.scrollTo(0, document.documentElement.scrollHeight);
+                        }, 50);
+                    }
+                } else {
+                    noMoreEarlierMessages = true;
+                    mainContent.innerHTML = `<div class="no-messages"><p>No messages in this group</p></div>`;
+                }
+            } catch (e) {
+                console.error('Failed to load earlier messages:', e);
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = 'Load previous messages';
+                }
+            } finally {
+                loadingEarlier = false;
+            }
+        }
+
+        // Check if user is at the bottom of the page
+        function isAtBottom() {
+            const scrollBottom = window.scrollY + window.innerHeight;
+            const docHeight = document.documentElement.scrollHeight;
+            return scrollBottom >= docHeight - 50;
+        }
+
+        // Setup scroll listener for loading earlier messages and marking visible as read at bottom
+        function setupScrollListener() {
+            window.addEventListener('scroll', () => {
+                // Load earlier messages only when scrolled to the very top (position 0)
+                if (window.scrollY === 0 && !loadingEarlier && !noMoreEarlierMessages && currentGroupId && !showingBookmarks) {
+                    loadEarlierMessages();
+                }
+
+                // Mark visible messages as read when scrolled to the bottom (no more messages below)
+                if (isAtBottom() && currentGroupId && !showingBookmarks) {
+                    markVisibleMessagesAsRead();
+                }
+            });
+        }
+
+        // Mark all visible unread messages as read (used when at bottom of feed)
+        function markVisibleMessagesAsRead() {
+            document.querySelectorAll('.message-card').forEach(card => {
+                const rect = card.getBoundingClientRect();
+                // Check if card is at least partially visible in viewport
+                if (rect.bottom > 56 && rect.top < window.innerHeight) {
+                    const channelId = parseInt(card.dataset.channelId);
+                    const albumIds = card.dataset.albumIds.split(',').map(id => parseInt(id));
+                    const key = `${channelId}-${albumIds.join('-')}`;
+                    const isAlreadyRead = card.dataset.read === '1';
+
+                    if (!isAlreadyRead && !readMessages.has(key)) {
+                        readMessages.add(key);
+                        markAlbumAsRead(channelId, albumIds);
+                    }
+                }
+            });
+        }
+
+        // Check if content fits on screen without scrolling, and if so mark visible as read
+        function checkIfNoScrollNeeded() {
+            if (!currentGroupId || showingBookmarks) return;
+            // Use setTimeout to ensure DOM has rendered
+            setTimeout(() => {
+                const docHeight = document.documentElement.scrollHeight;
+                const viewHeight = window.innerHeight;
+                // If content fits on screen (no scrollbar needed), mark visible messages as read
+                if (docHeight <= viewHeight + 50) {
+                    markVisibleMessagesAsRead();
+                }
+            }, 100);
+        }
+
+        // Initialize scroll listener once
+        setupScrollListener();
+
+        // Render message feed
+        function renderFeed() {
+            if (messages.length === 0) {
+                if (showingBookmarks) {
+                    mainContent.innerHTML = `<div class="no-messages"><p>No bookmarked messages</p></div>`;
+                } else {
+                    mainContent.innerHTML = `
+                        <div class="no-messages">
+                            <p>No unread messages in this group</p>
+                            <button class="load-earlier-btn" id="loadEarlierBtn">Load previous messages</button>
+                        </div>
+                    `;
+                    document.getElementById('loadEarlierBtn').addEventListener('click', loadEarlierMessagesManual);
+                }
+                return;
+            }
+
+            let html = '<div class="feed">';
+            messages.forEach(msg => {
+                html += renderMessage(msg);
+            });
+            html += '</div>';
+
+            mainContent.innerHTML = html;
+
+            // Setup scroll observation for marking as read
+            setupScrollObserver();
+
+            // Setup action button handlers
+            setupActionButtons();
+
+            // Check if all content fits on screen (no scroll needed)
+            checkIfNoScrollNeeded();
+        }
+
+        // Render new messages at the top of the feed without changing scroll position
+        function renderFeedPrepend(newCount) {
+            if (newCount === 0) return;
+
+            const feed = document.querySelector('.feed');
+            if (!feed) return;
+
+            // Save scroll state BEFORE adding content to preserve user's position
+            const scrollHeightBefore = document.documentElement.scrollHeight;
+            const scrollTopBefore = window.scrollY;
+
+            // Get the first existing message element to use as anchor
+            const firstExisting = feed.querySelector('.message-row');
+
+            // Build HTML for only the new messages (they are at the start of the messages array)
+            let newHtml = '';
+            for (let i = 0; i < newCount; i++) {
+                newHtml += renderMessage(messages[i]);
+            }
+
+            // Create a temporary container to parse the HTML
+            const temp = document.createElement('div');
+            temp.innerHTML = newHtml;
+
+            // Get all the new message-row elements
+            const newElements = Array.from(temp.children);
+
+            // Insert new elements at the beginning of the feed
+            if (firstExisting) {
+                // Insert each new element before the first existing one
+                newElements.forEach(el => {
+                    feed.insertBefore(el, firstExisting);
+                });
+            } else {
+                // No existing messages, just append
+                newElements.forEach(el => {
+                    feed.appendChild(el);
+                });
+            }
+
+            // Restore scroll position - adjust for the height of newly added content
+            // This keeps the user looking at the same content they were viewing
+            const scrollHeightAfter = document.documentElement.scrollHeight;
+            const addedHeight = scrollHeightAfter - scrollHeightBefore;
+            window.scrollTo(0, scrollTopBefore + addedHeight);
+
+            // Setup scroll observation for new elements only
+            if (currentObserver) {
+                newElements.forEach(el => {
+                    const card = el.querySelector('.message-card');
+                    if (card) {
+                        currentObserver.observe(card);
+                    }
+                });
+            }
+
+            // Setup action button handlers for new elements
+            setupActionButtonsForElements(newElements);
+        }
+
+        // Setup action buttons for specific elements (used when prepending)
+        function setupActionButtonsForElements(elements) {
+            elements.forEach(el => {
+                const actions = el.querySelector('.message-actions');
+                if (actions) {
+                    const channelId = parseInt(actions.dataset.channelId);
+                    const messageId = parseInt(actions.dataset.messageId);
+
+                    const thumbUp = actions.querySelector('.thumb-up');
+                    const thumbDown = actions.querySelector('.thumb-down');
+                    const bookmark = actions.querySelector('.bookmark');
+
+                    thumbUp.addEventListener('click', async () => {
+                        const isActive = thumbUp.classList.contains('active');
+                        const newRating = isActive ? 0 : 1;
+                        await updateRating(channelId, messageId, newRating);
+                        thumbUp.classList.toggle('active', newRating === 1);
+                        thumbDown.classList.remove('active');
+                    });
+
+                    thumbDown.addEventListener('click', async () => {
+                        const isActive = thumbDown.classList.contains('active');
+                        const newRating = isActive ? 0 : -1;
+                        await updateRating(channelId, messageId, newRating);
+                        thumbDown.classList.toggle('active', newRating === -1);
+                        thumbUp.classList.remove('active');
+                    });
+
+                    bookmark.addEventListener('click', async () => {
+                        const isActive = bookmark.classList.contains('active');
+                        const newBookmarked = isActive ? 0 : 1;
+                        await updateBookmark(channelId, messageId, newBookmarked);
+                        bookmark.classList.toggle('active', newBookmarked === 1);
+                    });
+                }
+
+                // Channel name click handler
+                const channelLink = el.querySelector('.channel-name-link');
+                if (channelLink) {
+                    channelLink.addEventListener('click', (e) => {
+                        e.preventDefault();
+                        const channelId = parseInt(channelLink.dataset.channelId);
+                        selectChannel(channelId);
+                    });
+                }
+
+                // Skip button handler
+                const skipBtn = el.querySelector('.skip-btn');
+                if (skipBtn) {
+                    skipBtn.addEventListener('click', () => {
+                        const currentRow = skipBtn.closest('.message-row');
+                        const nextRow = currentRow.nextElementSibling;
+                        if (nextRow && nextRow.classList.contains('message-row')) {
+                            const headerHeight = 56;
+                            const targetTop = nextRow.getBoundingClientRect().top + window.scrollY - headerHeight - 16;
+                            window.scrollTo({ top: targetTop, behavior: 'smooth' });
+                        }
+                    });
+                }
+
+                // Telegraph expand button handler
+                const telegraphBtn = el.querySelector('.telegraph-expand-btn');
+                if (telegraphBtn) {
+                    telegraphBtn.addEventListener('click', () => {
+                        const preview = telegraphBtn.closest('.telegraph-preview');
+                        const container = preview.querySelector('.telegraph-iframe-container');
+                        const iframe = preview.querySelector('.telegraph-iframe');
+                        const isExpanded = container.classList.contains('expanded');
+
+                        if (isExpanded) {
+                            container.classList.remove('expanded');
+                            iframe.style.height = '800px';
+                            telegraphBtn.innerHTML = '&#128196; Read Full';
+                        } else {
+                            container.classList.add('expanded');
+                            try {
+                                const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                                const height = iframeDoc.documentElement.scrollHeight;
+                                iframe.style.height = height + 'px';
+                            } catch (e) {
+                                iframe.style.height = '2000px';
+                            }
+                            telegraphBtn.innerHTML = '&#128196; Collapse';
+                        }
+                    });
+                }
+
+                // Load reply message content
+                const replyEl = el.querySelector('.message-reply[data-reply-to]');
+                if (replyEl) {
+                    loadReplyMessageForElement(replyEl);
+                }
+            });
+        }
+
+        // Load reply message for a single element
+        async function loadReplyMessageForElement(replyEl) {
+            const channelId = parseInt(replyEl.dataset.channelId);
+            const replyToId = parseInt(replyEl.dataset.replyTo);
+            const contentEl = replyEl.querySelector('.message-reply-content');
+            const textEl = replyEl.querySelector('.message-reply-text');
+
+            if (!textEl.classList.contains('message-reply-loading')) return;
+
+            try {
+                const res = await fetch(`/api/message/${channelId}/${replyToId}`);
+                if (res.ok) {
+                    const msg = await res.json();
+                    textEl.classList.remove('message-reply-loading');
+
+                    let html = '';
+                    if (msg.message) {
+                        html += `<div class="message-reply-text">${escapeHtml(msg.message)}</div>`;
+                    }
+
+                    if (msg.media_path && msg.media_type) {
+                        const mediaUrl = `/media/${msg.media_path}`;
+                        const effectiveType = getEffectiveMediaTypeFromPath(msg.media_type, msg.media_path);
+
+                        html += '<div class="message-reply-media">';
+                        if (effectiveType === 'photo') {
+                            html += `<img src="${mediaUrl}" alt="" loading="lazy">`;
+                        } else if (effectiveType === 'video') {
+                            // Check for thumbnail
+                            if (msg.video_thumbnail_path) {
+                                html += `<div class="video-thumbnail-container" data-video-src="${mediaUrl}">
+                                    <img src="/media/${msg.video_thumbnail_path}" alt="" loading="lazy" class="video-thumbnail">
+                                    <div class="video-play-overlay">&#9658;</div>
+                                </div>`;
+                            } else {
+                                html += `<video src="${mediaUrl}" controls muted preload="metadata" onloadedmetadata="handleVideoMetadata(this)"></video>`;
+                            }
+                        } else if (effectiveType === 'audio' || effectiveType === 'voice') {
+                            html += `<audio src="${mediaUrl}" controls preload="none"></audio>`;
+                        } else {
+                            const filename = msg.media_path.split('/').pop();
+                            html += `<a href="${mediaUrl}" target="_blank">📄 ${escapeHtml(filename)}</a>`;
+                        }
+                        html += '</div>';
+                    }
+
+                    if (!html) {
+                        html = '<div class="message-reply-text">[Message]</div>';
+                    }
+
+                    contentEl.innerHTML = html;
+                } else {
+                    textEl.classList.remove('message-reply-loading');
+                    textEl.textContent = '[Message not found]';
+                }
+            } catch (e) {
+                textEl.classList.remove('message-reply-loading');
+                textEl.textContent = '[Failed to load]';
+            }
+        }
+
+        // Render a single message
+        function renderMessage(msg) {
+            const date = msg.date ? new Date(msg.date * 1000).toLocaleString() : '';
+            const photoUrl = `/api/channel/${msg.channel_id}/photo`;
+            const initial = msg.channel_title ? msg.channel_title[0].toUpperCase() : '?';
+
+            let textHtml = escapeHtml(msg.message || '');
+            // Apply entities (links, formatting)
+            if (msg.entities) {
+                try {
+                    const entities = typeof msg.entities === 'string' ? JSON.parse(msg.entities) : msg.entities;
+                    textHtml = applyEntities(msg.message || '', entities);
+                } catch (e) {
+                    // Keep escaped text if parsing fails
+                }
+            }
+
+            // Render media (album or single)
+            let mediaHtml = '';
+            const mediaItems = msg.media_items || [];
+
+            if (mediaItems.length === 1) {
+                // Single media item
+                const item = mediaItems[0];
+                const mediaUrl = `/media/${item.path}`;
+                const effectiveType = getEffectiveMediaType(item);
+                if (effectiveType === 'photo') {
+                    mediaHtml = `<div class="message-media"><img src="${mediaUrl}" alt="" loading="lazy"></div>`;
+                } else if (effectiveType === 'video') {
+                    mediaHtml = renderVideo(item);
+                } else if (effectiveType === 'audio') {
+                    mediaHtml = renderAudioPlayer(item);
+                } else if (effectiveType === 'voice') {
+                    mediaHtml = `<div class="message-media"><audio src="${mediaUrl}" controls preload="none" style="width:100%"></audio></div>`;
+                } else if (item.path) {
+                    // Other file types - show as file attachment
+                    mediaHtml = renderFileAttachment(item);
+                }
+            } else if (mediaItems.length > 1) {
+                // Album with multiple items - show in a single column
+                mediaItems.forEach(item => {
+                    const mediaUrl = `/media/${item.path}`;
+                    const effectiveType = getEffectiveMediaType(item);
+                    if (effectiveType === 'photo') {
+                        mediaHtml += `<div class="message-media"><img src="${mediaUrl}" alt="" loading="lazy"></div>`;
+                    } else if (effectiveType === 'video') {
+                        mediaHtml += renderVideo(item);
+                    } else if (effectiveType === 'audio') {
+                        mediaHtml += renderAudioPlayer(item);
+                    } else if (effectiveType === 'voice') {
+                        mediaHtml += `<div class="message-media"><audio src="${mediaUrl}" controls preload="none" style="width:100%"></audio></div>`;
+                    } else if (item.path) {
+                        mediaHtml += renderFileAttachment(item);
+                    }
+                });
+            }
+
+            // Check for telegraph preview
+            let telegraphHtml = '';
+            const telegraphInfo = getTelegraphInfo(msg);
+            if (telegraphInfo) {
+                const localUrl = `/telegraph/${msg.channel_id}/${telegraphInfo.slug}.html`;
+                const previewId = `telegraph-${msg.channel_id}-${msg.id}`;
+                telegraphHtml = `
+                    <div class="telegraph-preview" id="${previewId}">
+                        <div class="telegraph-iframe-container">
+                            <iframe class="telegraph-iframe" src="${localUrl}" loading="lazy"></iframe>
+                        </div>
+                        <div class="telegraph-actions">
+                            <button class="telegraph-btn telegraph-expand-btn">&#128196; Read Full</button>
+                            <a href="${localUrl}" target="_blank" class="telegraph-btn secondary">&#128279; Open in New Tab</a>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Check for YouTube videos
+            let youtubeHtml = '';
+            const youtubeVideos = getYoutubeVideos(msg);
+            for (const videoId of youtubeVideos) {
+                youtubeHtml += `
+                    <div class="youtube-embed">
+                        <iframe
+                            src="https://www.youtube.com/embed/${videoId}"
+                            loading="lazy"
+                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                            allowfullscreen>
+                        </iframe>
+                    </div>
+                `;
+            }
+
+            // Check for reply to another message
+            let replyHtml = '';
+            if (msg.reply_to_msg_id) {
+                const replyId = `reply-${msg.channel_id}-${msg.id}`;
+                replyHtml = `
+                    <div class="message-reply" id="${replyId}" data-channel-id="${msg.channel_id}" data-reply-to="${msg.reply_to_msg_id}">
+                        <div class="message-reply-header">Reply to message</div>
+                        <div class="message-reply-content">
+                            <div class="message-reply-text message-reply-loading">Loading...</div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            let statsHtml = '';
+            if (msg.views || msg.forwards) {
+                statsHtml = '<div class="message-stats">';
+                if (msg.views) statsHtml += `<span>${msg.views} views</span>`;
+                if (msg.forwards) statsHtml += `<span>${msg.forwards} forwards</span>`;
+                statsHtml += '</div>';
+            }
+
+            // Store album message IDs as data attribute for marking all as read
+            const albumIds = (msg.album_message_ids || [msg.id]).join(',');
+
+            // Determine current rating and bookmark state
+            const rating = msg.rating || 0;
+            const bookmarked = msg.bookmarked || 0;
+            const thumbUpActive = rating === 1 ? 'active' : '';
+            const thumbDownActive = rating === -1 ? 'active' : '';
+            const bookmarkActive = bookmarked === 1 ? 'active' : '';
+
+            // Check if this message is a duplicate
+            const isDuplicate = msg.duplicate_of_channel && msg.duplicate_of_message;
+            const duplicateClass = isDuplicate ? ' message-duplicate' : '';
+            const duplicateIndicator = isDuplicate ? `
+                <div class="duplicate-indicator">
+                    <span class="duplicate-icon">&#128257;</span>
+                    <span>Similar content seen earlier</span>
+                </div>
+            ` : '';
+
+            // Build debug info HTML
+            let debugInfoHtml = `
+                <div class="debug-info">
+                    <div class="debug-row"><span class="debug-label">Message ID:</span><span class="debug-value">${msg.id}</span></div>
+                    <div class="debug-row"><span class="debug-label">Channel ID:</span><span class="debug-value">${msg.channel_id}</span></div>
+                    <div class="debug-row"><span class="debug-label">Date (Unix):</span><span class="debug-value">${msg.date}</span></div>
+                    <div class="debug-row"><span class="debug-label">Read:</span><span class="debug-value">${msg.read || 0}</span></div>
+                    <div class="debug-row"><span class="debug-label">Read synced:</span><span class="debug-value">${msg.read_synced_to_tg || 0}</span></div>
+                    <div class="debug-row"><span class="debug-label">Rating:</span><span class="debug-value">${msg.rating || 0}</span></div>
+                    <div class="debug-row"><span class="debug-label">Bookmarked:</span><span class="debug-value">${msg.bookmarked || 0}</span></div>
+                    <div class="debug-row"><span class="debug-label">Media type:</span><span class="debug-value">${msg.media_type || 'none'}</span></div>
+                    <div class="debug-row"><span class="debug-label">Media path:</span><span class="debug-value">${msg.media_path || 'none'}</span></div>
+                    <div class="debug-row"><span class="debug-label">Grouped ID:</span><span class="debug-value">${msg.grouped_id || 'none'}</span></div>
+                    <div class="debug-row"><span class="debug-label">Views:</span><span class="debug-value">${msg.views || 0}</span></div>
+                    <div class="debug-row"><span class="debug-label">Forwards:</span><span class="debug-value">${msg.forwards || 0}</span></div>`;
+
+            // Add AI summary if present
+            if (msg.ai_summary) {
+                debugInfoHtml += `<div class="debug-row"><span class="debug-label">AI Summary:</span><span class="debug-value ai-summary">${escapeHtml(msg.ai_summary)}</span></div>`;
+            }
+            if (msg.content_hash) {
+                debugInfoHtml += `<div class="debug-row"><span class="debug-label">Content hash:</span><span class="debug-value">${escapeHtml(msg.content_hash)}</span></div>`;
+            }
+            if (isDuplicate) {
+                debugInfoHtml += `<div class="debug-row"><span class="debug-label">Duplicate of:</span><span class="debug-value duplicate">channel ${msg.duplicate_of_channel} / msg ${msg.duplicate_of_message}</span></div>`;
+            }
+            debugInfoHtml += '</div>';
+
+            return `
+                <div class="message-row${duplicateClass}">
+                    <button class="skip-btn" title="Skip to next message">&#8595;</button>
+                    <div class="message-card" data-channel-id="${msg.channel_id}" data-message-id="${msg.id}" data-album-ids="${albumIds}" data-read="${msg.read || 0}">
+                        <div class="message-header">
+                            <div class="message-channel-icon">
+                                <img src="${photoUrl}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='${initial}'">
+                            </div>
+                            <div class="message-channel-info">
+                                <a class="message-channel-name channel-name-link" data-channel-id="${msg.channel_id}">${escapeHtml(msg.channel_title || '')}<span class="debug-channel-id">[${msg.channel_id}]</span></a>
+                                <div class="message-date">${date}</div>
+                            </div>
+                        </div>
+                        ${duplicateIndicator}
+                        <div class="message-body">
+                            ${replyHtml}
+                            <div class="message-text">${textHtml}</div>
+                            ${mediaHtml}
+                            ${telegraphHtml}
+                            ${youtubeHtml}
+                        </div>
+                        ${statsHtml}
+                        ${debugInfoHtml}
+                    </div>
+                    <div class="message-actions" data-channel-id="${msg.channel_id}" data-message-id="${msg.id}">
+                        <button class="action-btn thumb-up ${thumbUpActive}" title="Like">&#128077;</button>
+                        <button class="action-btn thumb-down ${thumbDownActive}" title="Dislike">&#128078;</button>
+                        <button class="action-btn bookmark ${bookmarkActive}" title="Bookmark">
+                            <svg class="bookmark-icon ${bookmarkActive ? 'filled' : ''}" viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>
+                        </button>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Extract YouTube video IDs from message
+        function getYoutubeVideos(msg) {
+            const videos = [];
+            const seen = new Set();
+
+            // YouTube URL patterns
+            const patterns = [
+                /(?:https?:\/\/)?(?:www\.)?youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})/gi,
+                /(?:https?:\/\/)?(?:www\.)?youtube\.com\/embed\/([a-zA-Z0-9_-]{11})/gi,
+                /(?:https?:\/\/)?(?:www\.)?youtube\.com\/v\/([a-zA-Z0-9_-]{11})/gi,
+                /(?:https?:\/\/)?youtu\.be\/([a-zA-Z0-9_-]{11})/gi,
+                /(?:https?:\/\/)?(?:www\.)?youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/gi
+            ];
+
+            // Check message text
+            if (msg.message) {
+                for (const pattern of patterns) {
+                    let match;
+                    while ((match = pattern.exec(msg.message)) !== null) {
+                        if (!seen.has(match[1])) {
+                            seen.add(match[1]);
+                            videos.push(match[1]);
+                        }
+                    }
+                }
+            }
+
+            // Check entities for URLs
+            const entities = msg.entities ? (typeof msg.entities === 'string' ? JSON.parse(msg.entities) : msg.entities) : [];
+            for (const entity of entities) {
+                if (entity.type === 'MessageEntityTextUrl' && entity.url) {
+                    for (const pattern of patterns) {
+                        let match;
+                        while ((match = pattern.exec(entity.url)) !== null) {
+                            if (!seen.has(match[1])) {
+                                seen.add(match[1]);
+                                videos.push(match[1]);
+                            }
+                        }
+                    }
+                }
+            }
+
+            return videos;
+        }
+
+        // Extract telegraph URL and slug from message entities or text
+        function getTelegraphInfo(msg) {
+            if (!msg.html_downloaded) return null;
+
+            // Check entities for telegraph URLs
+            const entities = msg.entities ? (typeof msg.entities === 'string' ? JSON.parse(msg.entities) : msg.entities) : [];
+            for (const entity of entities) {
+                if (entity.type === 'MessageEntityUrl' || entity.type === 'MessageEntityTextUrl') {
+                    const url = entity.url || (msg.message ? msg.message.substring(entity.offset, entity.offset + entity.length) : '');
+                    const match = url.match(/https?:\/\/telegra\.ph\/([^\/\?#]+)/i);
+                    if (match) {
+                        return { url, slug: match[1] };
+                    }
+                }
+            }
+
+            // Also check message text directly for telegraph URLs
+            if (msg.message) {
+                const match = msg.message.match(/https?:\/\/telegra\.ph\/([^\/\s\?#]+)/i);
+                if (match) {
+                    return { url: match[0], slug: match[1] };
+                }
+            }
+
+            return null;
+        }
+
+        // Detect effective media type from file extension
+        function getEffectiveMediaType(item) {
+            const type = item.type || 'document';
+            if (type === 'photo' || type === 'video' || type === 'audio' || type === 'voice') {
+                return type;
+            }
+            // Check file extension for documents
+            if (item.path) {
+                const ext = item.path.split('.').pop().toLowerCase();
+                const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
+                const videoExts = ['mp4', 'webm', 'mov', 'avi', 'mkv'];
+                const audioExts = ['mp3', 'ogg', 'wav', 'flac', 'm4a', 'aac'];
+                if (imageExts.includes(ext)) return 'photo';
+                if (videoExts.includes(ext)) return 'video';
+                if (audioExts.includes(ext)) return 'audio';
+            }
+            return type;
+        }
+
+        // Render audio player with filename
+        function renderAudioPlayer(item) {
+            const mediaUrl = `/media/${item.path}`;
+            // Split on both forward and back slashes to handle different path formats
+            const fileName = item.path ? item.path.split(/[/\\]/).pop() : 'Audio';
+
+            return `
+                <div class="audio-player">
+                    <div class="audio-filename">${escapeHtml(fileName)}</div>
+                    <audio src="${mediaUrl}" controls preload="none" style="width:100%"></audio>
+                </div>
+            `;
+        }
+
+        // Render file attachment for non-image/video media
+        function renderFileAttachment(item) {
+            const mediaUrl = `/media/${item.path}`;
+            // Split on both forward and back slashes to handle different path formats
+            const fileName = item.path ? item.path.split(/[/\\]/).pop() : 'File';
+            const mediaType = item.type || 'document';
+
+            // Get icon based on type
+            let icon = '&#128196;'; // Default document icon
+            let iconClass = 'document';
+            if (mediaType === 'audio') {
+                icon = '&#127925;'; // Musical note
+                iconClass = 'audio';
+            } else if (mediaType === 'voice') {
+                icon = '&#127908;'; // Microphone
+                iconClass = 'voice';
+            } else if (mediaType === 'sticker') {
+                icon = '&#128513;'; // Grinning face
+                iconClass = 'sticker';
+            } else if (mediaType === 'animation') {
+                icon = '&#127916;'; // Film frames
+                iconClass = 'document';
+            }
+
+            // Format type label
+            const typeLabel = mediaType.charAt(0).toUpperCase() + mediaType.slice(1);
+
+            return `
+                <a href="${mediaUrl}" target="_blank" class="file-attachment" download>
+                    <div class="file-icon ${iconClass}">${icon}</div>
+                    <div class="file-info">
+                        <div class="file-name">${escapeHtml(fileName)}</div>
+                        <div class="file-type">${typeLabel}</div>
+                    </div>
+                </a>
+            `;
+        }
+
+        // Render video with optional thumbnail
+        function renderVideo(item) {
+            const mediaUrl = `/media/${item.path}`;
+            const thumbPath = item.video_thumbnail_path;
+
+            if (thumbPath) {
+                // Show thumbnail with play button overlay
+                return `<div class="message-media">
+                    <div class="video-thumbnail-container" data-video-src="${mediaUrl}">
+                        <img src="/media/${thumbPath}" alt="" loading="lazy" class="video-thumbnail">
+                        <div class="video-play-overlay">&#9658;</div>
+                    </div>
+                </div>`;
+            } else {
+                // Fallback to regular video element
+                return `<div class="message-media"><video src="${mediaUrl}" controls muted preload="metadata" onloadedmetadata="handleVideoMetadata(this)"></video></div>`;
+            }
+        }
+
+        // Apply entities to message text
+        function applyEntities(text, entities) {
+            if (!entities || entities.length === 0 || !text) return escapeHtml(text);
+
+            // Telegram uses UTF-16 code units for offsets, but we need grapheme indices
+            // Build a mapping from UTF-16 offset to grapheme index
+            const chars = Array.from(text); // Grapheme clusters
+            const utf16ToGrapheme = [];
+            let utf16Pos = 0;
+            for (let i = 0; i < chars.length; i++) {
+                const charLen = chars[i].length; // UTF-16 length of this grapheme
+                for (let j = 0; j < charLen; j++) {
+                    utf16ToGrapheme[utf16Pos + j] = i;
+                }
+                utf16Pos += charLen;
+            }
+            // Handle end position
+            utf16ToGrapheme[utf16Pos] = chars.length;
+
+            const formatting = chars.map(() => ({ bold: false, italic: false, underline: false, strike: false, code: false, pre: false, url: null }));
+
+            // Apply entities to formatting array
+            entities.forEach(entity => {
+                // Convert UTF-16 offsets to grapheme indices
+                const startIdx = utf16ToGrapheme[entity.offset] ?? 0;
+                const endIdx = utf16ToGrapheme[entity.offset + entity.length] ?? chars.length;
+                for (let i = startIdx; i < endIdx; i++) {
+                    switch (entity.type) {
+                        case 'MessageEntityBold':
+                            formatting[i].bold = true;
+                            break;
+                        case 'MessageEntityItalic':
+                            formatting[i].italic = true;
+                            break;
+                        case 'MessageEntityUnderline':
+                            formatting[i].underline = true;
+                            break;
+                        case 'MessageEntityStrike':
+                            formatting[i].strike = true;
+                            break;
+                        case 'MessageEntityCode':
+                            formatting[i].code = true;
+                            break;
+                        case 'MessageEntityPre':
+                            formatting[i].pre = true;
+                            break;
+                        case 'MessageEntityUrl':
+                        case 'MessageEntityTextUrl':
+                            // Add protocol if missing - use UTF-16 substring for URL extraction
+                            let url = entity.url || text.substring(entity.offset, entity.offset + entity.length);
+                            if (url && !url.match(/^https?:\/\//i)) {
+                                url = 'https://' + url;
+                            }
+                            formatting[i].url = url;
+                            break;
+                    }
+                }
+            });
+
+            // Build result by grouping consecutive chars with same formatting
+            let result = '';
+            let i = 0;
+            while (i < chars.length) {
+                const fmt = formatting[i];
+                // Find run of chars with same formatting
+                let j = i + 1;
+                while (j < chars.length &&
+                       formatting[j].bold === fmt.bold &&
+                       formatting[j].italic === fmt.italic &&
+                       formatting[j].underline === fmt.underline &&
+                       formatting[j].strike === fmt.strike &&
+                       formatting[j].code === fmt.code &&
+                       formatting[j].pre === fmt.pre &&
+                       formatting[j].url === fmt.url) {
+                    j++;
+                }
+
+                // Get the text for this run
+                let chunk = escapeHtml(chars.slice(i, j).join(''));
+
+                // Apply formatting (innermost first)
+                if (fmt.code) chunk = `<code>${chunk}</code>`;
+                if (fmt.pre) chunk = `<pre>${chunk}</pre>`;
+                if (fmt.bold) chunk = `<strong>${chunk}</strong>`;
+                if (fmt.italic) chunk = `<em>${chunk}</em>`;
+                if (fmt.underline) chunk = `<u>${chunk}</u>`;
+                if (fmt.strike) chunk = `<s>${chunk}</s>`;
+                if (fmt.url) chunk = `<a href="${escapeHtml(fmt.url)}" target="_blank">${chunk}</a>`;
+
+                result += chunk;
+                i = j;
+            }
+
+            return result;
+        }
+
+        // Setup Intersection Observer for marking messages as read
+        let currentObserver = null;
+        function setupScrollObserver() {
+            // Disconnect previous observer if exists
+            if (currentObserver) {
+                currentObserver.disconnect();
+            }
+
+            currentObserver = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    // Message scrolled out of view above the viewport (user scrolled down past it)
+                    if (!entry.isIntersecting && entry.boundingClientRect.bottom < 56) {
+                        const card = entry.target;
+                        const channelId = parseInt(card.dataset.channelId);
+                        const albumIds = card.dataset.albumIds.split(',').map(id => parseInt(id));
+                        const key = `${channelId}-${albumIds.join('-')}`;
+                        const isAlreadyRead = card.dataset.read === '1';
+
+                        // Only mark as read if not already read and not already processed
+                        if (!isAlreadyRead && !readMessages.has(key)) {
+                            readMessages.add(key);
+                            markAlbumAsRead(channelId, albumIds);
+                        }
+                    }
+                });
+            }, {
+                threshold: 0,
+                rootMargin: '-56px 0px 0px 0px' // Account for header height
+            });
+
+            document.querySelectorAll('.message-card').forEach(card => {
+                currentObserver.observe(card);
+            });
+        }
+
+        // Mark all messages in an album as read
+        async function markAlbumAsRead(channelId, messageIds) {
+            try {
+                const messages = messageIds.map(id => ({channel_id: channelId, message_id: id}));
+                await fetch('/api/messages/read', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ messages })
+                });
+
+                // Update local channel stats and re-render group tabs
+                const channel = channels.find(c => c.id === channelId);
+                if (channel && channel.stats && channel.stats.unread > 0) {
+                    // Decrease unread count by number of messages marked as read
+                    channel.stats.unread = Math.max(0, channel.stats.unread - messageIds.length);
+                    renderGroupTabs();
+                }
+            } catch (e) {
+                console.error('Failed to mark messages as read:', e);
+            }
+        }
+
+        // Setup action button handlers
+        function setupActionButtons() {
+            document.querySelectorAll('.message-actions').forEach(actions => {
+                const channelId = parseInt(actions.dataset.channelId);
+                const messageId = parseInt(actions.dataset.messageId);
+
+                const thumbUp = actions.querySelector('.thumb-up');
+                const thumbDown = actions.querySelector('.thumb-down');
+                const bookmark = actions.querySelector('.bookmark');
+
+                thumbUp.addEventListener('click', async () => {
+                    const isActive = thumbUp.classList.contains('active');
+                    const newRating = isActive ? 0 : 1;
+                    await updateRating(channelId, messageId, newRating);
+                    thumbUp.classList.toggle('active', newRating === 1);
+                    thumbDown.classList.remove('active');
+                });
+
+                thumbDown.addEventListener('click', async () => {
+                    const isActive = thumbDown.classList.contains('active');
+                    const newRating = isActive ? 0 : -1;
+                    await updateRating(channelId, messageId, newRating);
+                    thumbDown.classList.toggle('active', newRating === -1);
+                    thumbUp.classList.remove('active');
+                });
+
+                bookmark.addEventListener('click', async () => {
+                    const isActive = bookmark.classList.contains('active');
+                    const newBookmarked = isActive ? 0 : 1;
+                    await updateBookmark(channelId, messageId, newBookmarked);
+                    bookmark.classList.toggle('active', newBookmarked === 1);
+                });
+            });
+
+            // Channel name click handlers in message cards
+            document.querySelectorAll('.message-card .channel-name-link').forEach(link => {
+                link.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    const channelId = parseInt(link.dataset.channelId);
+                    selectChannel(channelId);
+                });
+            });
+
+            // Skip button handlers - scroll to next message
+            document.querySelectorAll('.skip-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const currentRow = btn.closest('.message-row');
+                    const nextRow = currentRow.nextElementSibling;
+                    if (nextRow && nextRow.classList.contains('message-row')) {
+                        // Scroll to next message with offset for header
+                        const headerHeight = 56;
+                        const targetTop = nextRow.getBoundingClientRect().top + window.scrollY - headerHeight - 16;
+                        window.scrollTo({ top: targetTop, behavior: 'smooth' });
+                    }
+                });
+            });
+
+            // Telegraph expand button handlers
+            document.querySelectorAll('.telegraph-expand-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const preview = btn.closest('.telegraph-preview');
+                    const container = preview.querySelector('.telegraph-iframe-container');
+                    const iframe = preview.querySelector('.telegraph-iframe');
+                    const isExpanded = container.classList.contains('expanded');
+
+                    if (isExpanded) {
+                        container.classList.remove('expanded');
+                        iframe.style.height = '800px';
+                        btn.innerHTML = '&#128196; Read Full';
+                    } else {
+                        container.classList.add('expanded');
+                        // Try to get the iframe content height
+                        try {
+                            const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                            const height = iframeDoc.documentElement.scrollHeight;
+                            iframe.style.height = height + 'px';
+                        } catch (e) {
+                            // Cross-origin or not loaded yet, use a large default
+                            iframe.style.height = '2000px';
+                        }
+                        btn.innerHTML = '&#128196; Collapse';
+                    }
+                });
+            });
+
+            // Load reply message content
+            loadReplyMessages();
+        }
+
+        // Load reply messages for all visible replies
+        async function loadReplyMessages() {
+            const replyElements = document.querySelectorAll('.message-reply[data-reply-to]');
+            for (const replyEl of replyElements) {
+                const channelId = parseInt(replyEl.dataset.channelId);
+                const replyToId = parseInt(replyEl.dataset.replyTo);
+                const contentEl = replyEl.querySelector('.message-reply-content');
+                const textEl = replyEl.querySelector('.message-reply-text');
+
+                // Skip if already loaded
+                if (!textEl.classList.contains('message-reply-loading')) continue;
+
+                try {
+                    const res = await fetch(`/api/message/${channelId}/${replyToId}`);
+                    if (res.ok) {
+                        const msg = await res.json();
+                        textEl.classList.remove('message-reply-loading');
+
+                        // Build content HTML
+                        let html = '';
+
+                        // Add text content
+                        if (msg.message) {
+                            html += `<div class="message-reply-text">${escapeHtml(msg.message)}</div>`;
+                        }
+
+                        // Add full-size media if available
+                        if (msg.media_path && msg.media_type) {
+                            const mediaUrl = `/media/${msg.media_path}`;
+                            const effectiveType = getEffectiveMediaTypeFromPath(msg.media_type, msg.media_path);
+
+                            html += '<div class="message-reply-media">';
+                            if (effectiveType === 'photo') {
+                                html += `<img src="${mediaUrl}" alt="" loading="lazy">`;
+                            } else if (effectiveType === 'video') {
+                                // Check for thumbnail
+                                if (msg.video_thumbnail_path) {
+                                    html += `<div class="video-thumbnail-container" data-video-src="${mediaUrl}">
+                                        <img src="/media/${msg.video_thumbnail_path}" alt="" loading="lazy" class="video-thumbnail">
+                                        <div class="video-play-overlay">&#9658;</div>
+                                    </div>`;
+                                } else {
+                                    html += `<video src="${mediaUrl}" controls muted preload="metadata" onloadedmetadata="handleVideoMetadata(this)"></video>`;
+                                }
+                            } else if (effectiveType === 'audio' || effectiveType === 'voice') {
+                                html += `<audio src="${mediaUrl}" controls preload="none"></audio>`;
+                            } else {
+                                // Document or other - show as link
+                                const filename = msg.media_path.split('/').pop();
+                                html += `<a href="${mediaUrl}" target="_blank">📄 ${escapeHtml(filename)}</a>`;
+                            }
+                            html += '</div>';
+                        }
+
+                        // Show placeholder if no content
+                        if (!html) {
+                            html = '<div class="message-reply-text">[Message]</div>';
+                        }
+
+                        contentEl.innerHTML = html;
+                    } else {
+                        textEl.classList.remove('message-reply-loading');
+                        textEl.textContent = '[Message not found]';
+                    }
+                } catch (e) {
+                    textEl.classList.remove('message-reply-loading');
+                    textEl.textContent = '[Failed to load]';
+                }
+            }
+        }
+
+        // Get effective media type from type and path (for replies)
+        function getEffectiveMediaTypeFromPath(type, path) {
+            if (type === 'photo' || type === 'video' || type === 'audio' || type === 'voice') return type;
+            if (path) {
+                const ext = path.split('.').pop().toLowerCase();
+                const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
+                const videoExts = ['mp4', 'webm', 'mov', 'avi', 'mkv'];
+                const audioExts = ['mp3', 'ogg', 'wav', 'flac', 'm4a'];
+                if (imageExts.includes(ext)) return 'photo';
+                if (videoExts.includes(ext)) return 'video';
+                if (audioExts.includes(ext)) return 'audio';
+            }
+            return type;
+        }
+
+        // Update message rating
+        async function updateRating(channelId, messageId, rating) {
+            try {
+                await fetch('/api/message/rate', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ channel_id: channelId, message_id: messageId, rating })
+                });
+            } catch (e) {
+                console.error('Failed to update rating:', e);
+            }
+        }
+
+        // Update message bookmark
+        async function updateBookmark(channelId, messageId, bookmarked) {
+            try {
+                await fetch('/api/message/bookmark', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ channel_id: channelId, message_id: messageId, bookmarked })
+                });
+            } catch (e) {
+                console.error('Failed to update bookmark:', e);
+            }
+        }
+
+        // Render channels grouped
+        function renderChannels() {
+            // Group channels
+            const grouped = {};
+            const ungrouped = [];
+
+            channels.forEach(channel => {
+                if (channel.group_id) {
+                    if (!grouped[channel.group_id]) {
+                        grouped[channel.group_id] = {
+                            name: channel.group_name,
+                            channels: []
+                        };
+                    }
+                    grouped[channel.group_id].channels.push(channel);
+                } else {
+                    ungrouped.push(channel);
+                }
+            });
+
+            let html = '';
+
+            // Render grouped channels
+            Object.values(grouped).forEach(group => {
+                html += `<div class="channel-group">`;
+                html += `<div class="group-header">${escapeHtml(group.name)}</div>`;
+                group.channels.forEach(channel => {
+                    html += renderChannelItem(channel);
+                });
+                html += `</div>`;
+            });
+
+            // Render ungrouped channels
+            if (ungrouped.length > 0) {
+                html += `<div class="channel-group">`;
+                html += `<div class="group-header">Ungrouped</div>`;
+                ungrouped.forEach(channel => {
+                    html += renderChannelItem(channel);
+                });
+                html += `</div>`;
+            }
+
+            channelList.innerHTML = html;
+
+            // Add event listeners
+            document.querySelectorAll('.active-toggle').forEach(toggle => {
+                toggle.addEventListener('change', handleActiveToggle);
+            });
+
+            document.querySelectorAll('.download-all-toggle').forEach(toggle => {
+                toggle.addEventListener('change', handleDownloadAllToggle);
+            });
+
+            document.querySelectorAll('.backup-path-input').forEach(input => {
+                input.addEventListener('change', handleBackupPathChange);
+            });
+
+            document.querySelectorAll('.group-select').forEach(select => {
+                select.addEventListener('change', handleGroupChange);
+            });
+
+            // Channel name click handlers
+            document.querySelectorAll('.channel-name-link').forEach(link => {
+                link.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    const channelId = parseInt(link.dataset.channelId);
+                    selectChannel(channelId);
+                });
+            });
+        }
+
+        function renderChannelItem(channel) {
+            const initial = channel.title ? channel.title[0].toUpperCase() : '?';
+            const username = channel.username ? `@${channel.username}` : '';
+
+            let groupOptions = '<option value="">No group</option>';
+            groups.forEach(group => {
+                const selected = channel.group_id === group.id ? 'selected' : '';
+                groupOptions += `<option value="${group.id}" ${selected}>${escapeHtml(group.name)}</option>`;
+            });
+
+            const photoUrl = `/api/channel/${channel.id}/photo`;
+            const isSelected = currentChannelId === channel.id;
+            const hasGroup = channel.group_id != null;
+
+            // Build stats HTML
+            const stats = channel.stats || {};
+            let statsHtml = '<div class="channel-stats">';
+            // Always show total/unread
+            if (stats.unread > 0) {
+                statsHtml += `<span class="channel-stat unread">${stats.unread}/${stats.total}</span>`;
+            } else {
+                statsHtml += `<span class="channel-stat">${stats.total || 0}</span>`;
+            }
+            // Show bookmarks if any
+            if (stats.bookmarked > 0) {
+                statsHtml += `<span class="channel-stat bookmarked"><svg class="bookmark-icon filled" viewBox="0 0 24 24" style="width:12px;height:12px;vertical-align:middle;margin-right:2px;"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>${stats.bookmarked}</span>`;
+            }
+            // Show likes if any
+            if (stats.likes > 0) {
+                statsHtml += `<span class="channel-stat likes">&#128077;${stats.likes}</span>`;
+            }
+            // Show dislikes if any
+            if (stats.dislikes > 0) {
+                statsHtml += `<span class="channel-stat dislikes">&#128078;${stats.dislikes}</span>`;
+            }
+            statsHtml += '</div>';
+
+            // Channel name is clickable if it has a group
+            // Add debug channel ID that shows in debug mode
+            const channelNameHtml = hasGroup
+                ? `<a class="channel-name channel-name-link" data-channel-id="${channel.id}">${escapeHtml(channel.title)}<span class="debug-channel-id">[${channel.id}]</span></a>`
+                : `<div class="channel-name">${escapeHtml(channel.title)}<span class="debug-channel-id">[${channel.id}]</span></div>`;
+
+            return `
+                <div class="channel-item${isSelected ? ' selected' : ''}" data-channel-id="${channel.id}">
+                    <div class="channel-icon">
+                        <img src="${photoUrl}" alt="" loading="lazy" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                        <span class="fallback" style="display:none;">${initial}</span>
+                    </div>
+                    <div class="channel-info">
+                        ${channelNameHtml}
+                        <div class="channel-username">${escapeHtml(username)}</div>
+                        ${statsHtml}
+                    </div>
+                    <div class="channel-controls">
+                        <label class="toggle">
+                            <input type="checkbox" class="active-toggle" data-channel-id="${channel.id}" ${channel.active ? 'checked' : ''}>
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <label class="download-all-label" title="Download full history">
+                            <input type="checkbox" class="download-all-toggle" data-channel-id="${channel.id}" ${channel.download_all ? 'checked' : ''}>
+                            All
+                        </label>
+                        <select class="group-select" data-channel-id="${channel.id}">
+                            ${groupOptions}
+                        </select>
+                    </div>
+                    <div class="channel-backup-path" style="display: ${channel.download_all ? 'block' : 'none'};">
+                        <input type="text" class="backup-path-input" data-channel-id="${channel.id}"
+                               placeholder="Backup path (optional)"
+                               value="${escapeHtml(channel.backup_path || '')}"
+                               title="Local folder to check for media before downloading from Telegram">
+                    </div>
+                </div>
+            `;
+        }
+
+        async function handleActiveToggle(e) {
+            const channelId = e.target.dataset.channelId;
+            const active = e.target.checked;
+
+            await fetch(`/api/channel/${channelId}/active`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({active})
+            });
+        }
+
+        async function handleDownloadAllToggle(e) {
+            const channelId = e.target.dataset.channelId;
+            const downloadAll = e.target.checked;
+
+            await fetch(`/api/channel/${channelId}/download_all`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({download_all: downloadAll})
+            });
+
+            // Show/hide backup path input
+            const channelItem = e.target.closest('.channel-item');
+            const backupPathDiv = channelItem.querySelector('.channel-backup-path');
+            if (backupPathDiv) {
+                backupPathDiv.style.display = downloadAll ? 'block' : 'none';
+            }
+        }
+
+        async function handleBackupPathChange(e) {
+            const channelId = e.target.dataset.channelId;
+            const backupPath = e.target.value.trim();
+
+            await fetch(`/api/channel/${channelId}/backup_path`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({backup_path: backupPath})
+            });
+        }
+
+        async function handleGroupChange(e) {
+            const channelId = e.target.dataset.channelId;
+            const groupId = e.target.value;
+
+            await fetch(`/api/channel/${channelId}/group`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({group_id: groupId})
+            });
+
+            // Reload to update grouping
+            await loadData();
+
+            // Re-apply filter if one is active
+            applyChannelFilter();
+        }
+
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Background refresh of channel stats every minute
+        async function refreshChannelStats() {
+            try {
+                const res = await fetch('/api/channels');
+                const freshChannels = await res.json();
+
+                // Calculate old unread count for current group before updating
+                let oldGroupUnread = 0;
+                if (currentGroupId && !showingBookmarks) {
+                    channels.forEach(ch => {
+                        if (ch.group_id === currentGroupId && ch.stats && ch.stats.unread) {
+                            oldGroupUnread += ch.stats.unread;
+                        }
+                    });
+                }
+
+                // Update only the stats in our local channels array
+                freshChannels.forEach(fresh => {
+                    const local = channels.find(c => c.id === fresh.id);
+                    if (local) {
+                        local.stats = fresh.stats;
+                    }
+                });
+
+                // Calculate new unread count for current group after updating
+                let newGroupUnread = 0;
+                if (currentGroupId && !showingBookmarks) {
+                    channels.forEach(ch => {
+                        if (ch.group_id === currentGroupId && ch.stats && ch.stats.unread) {
+                            newGroupUnread += ch.stats.unread;
+                        }
+                    });
+                }
+
+                renderGroupTabs();
+
+                // If current group has new unread messages and no messages are loaded, load them
+                if (currentGroupId && !showingBookmarks && newGroupUnread > oldGroupUnread && messages.length === 0) {
+                    loadGroupMessages(currentGroupId);
+                }
+            } catch (e) {
+                console.error('Failed to refresh channel stats:', e);
+            }
+        }
+
+        // Initial load
+        loadData().then(() => {
+            // Check URL params after data is loaded
+            loadFromUrl();
+
+            // Start background refresh every 60 seconds
+            setInterval(refreshChannelStats, 60000);
+        });
+    </script>
+</body>
+</html>

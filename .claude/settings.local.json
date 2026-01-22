@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv sync:*)",
+      "Bash(uv run python:*)",
+      "Bash(dir F:RTStgfeeddata /s /b)",
+      "Bash(cmd /c \"dir F:\\\\RTS\\\\tgfeed\\\\data /s /b 2>nul\")",
+      "Bash(cmd /c \"cd /d F:\\\\RTS\\\\tgfeed && uv sync\")",
+      "Bash(cmd /c \"dir F:\\\\RTS\\\\tgfeed\\\\templates\\\\static /b 2>nul\")",
+      "Bash(dir /b \"F:\\\\RTS\\\\tgfeed\\\\*.py\")",
+      "Bash(ls:*)",
+      "Bash(dir \"F:\\\\RTS\\\\tgfeed\" /b)",
+      "Bash(findstr:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(python:*)",
+      "Bash(.venvScriptspython generate_thumbnails.py)",
+      "Bash(.venvScriptspython.exe generate_thumbnails.py)",
+      "Bash(\".venv\\\\Scripts\\\\python.exe\" generate_thumbnails.py)",
+      "Bash(where:*)",
+      "Bash(\"C:\\\\Python312\\\\Scripts\\\\ffmpeg.exe\" -version)",
+      "Bash(ffmpeg:*)",
+      "Bash(dir \"F:\\\\RTS\\\\tgfeed\" /B *.py)",
+      "Bash(uv add:*)",
+      "Bash(dir:*)",
+      "Bash(find:*)",
+      "mcp__Windows-MCP__Powershell-Tool"
+    ]
+  }
+}
