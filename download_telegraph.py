@@ -14,7 +14,11 @@ import requests
 from config import DATA_DIR, validate_config
 from database import Database, DatabaseMigration
 
-# Configure logging
+# Configure logging with UTF-8 support for Windows
+import io
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -223,7 +227,7 @@ def download_telegraph_pages() -> None:
     with Database() as db:
         cursor = db.conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'channel_%'")
-        tables = [row[0] for row in cursor.fetchall()]
+        tables = [row[0] for row in cursor.fetchall() if not row[0].startswith("channel_backup_hash_")]
 
     if not tables:
         logger.info("No channel tables found")

@@ -12,7 +12,11 @@ from config import DATA_DIR
 from database import Database, DatabaseMigration
 from tg_client import TGClient, TGClientConnectionError, TGFloodWaitError, is_daemon_running
 
-# Configure logging
+# Configure logging with UTF-8 support for Windows
+import io
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",

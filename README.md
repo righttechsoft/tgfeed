@@ -6,6 +6,7 @@ A self-hosted Telegram channel aggregator with a web UI. Download messages from 
 
 - **Channel Sync**: Download messages from your Telegram channels
 - **Web Interface**: Browse messages in a clean, responsive UI
+- **Full-Text Search**: Search messages with substring matching (trigram index)
 - **Groups**: Organize channels into custom groups
 - **Read Tracking**: Automatically track read/unread messages
 - **Bookmarks**: Save messages for later
@@ -46,6 +47,11 @@ A self-hosted Telegram channel aggregator with a web UI. Download messages from 
    API_ID=your_api_id
    API_HASH=your_api_hash
    PHONE_NUMBER=+1234567890
+   ```
+
+   **Note:** The `.env` file is used as fallback when the daemon is not running. For production use with the daemon, credentials are stored in the database. Run the setup script to add credentials interactively:
+   ```bash
+   uv run python setup_creds.py
    ```
 
 5. **Create data directories**
@@ -130,6 +136,7 @@ chmod +x sync_service.sh
 - **Group Tabs**: Click to filter messages by channel group
 - **Unread Badges**: Numbers on tabs show unread message count
 - **Bookmark Tab**: Click the bookmark icon to view saved messages
+- **Search**: Click the magnifying glass icon to search messages
 - **Channel Filter**: Click a channel name in a message to filter to that channel only
 
 ### Sidebar (Burger Menu)
@@ -140,6 +147,17 @@ Click the hamburger menu (☰) to open the sidebar:
 - **All Checkbox**: Enable full history download (downloads entire channel history)
 - **Group Dropdown**: Assign channel to a group
 - **Stats**: View unread count, bookmarks, likes/dislikes per channel
+
+### Search
+
+- **Open Search**: Click the magnifying glass icon in the header
+- **Search Input**: Type your query (minimum 3 characters) and press Enter
+- **Substring Matching**: Uses trigram index - searching "gram" finds "telegram"
+- **Filtered Search**: If a group is selected, search only within that group
+- **Results**: Shows matching messages with highlighted snippets
+- **Clear Search**: Click "Clear search" or the X button to return to normal view
+
+**Note**: Run `index_search.py` periodically to keep the search index updated with new messages.
 
 ### Message Interactions
 
@@ -178,27 +196,48 @@ Press **Ctrl+D** to toggle debug mode, which displays:
 | `sync.sh/.bat` | Main sync loop - downloads new messages |
 | `sync_service.sh/.bat` | Background tasks - cleanup, thumbnails, hashes |
 | `web.sh/.bat` | Start web server |
+| `orchestrator.py` | TUI for managing all scripts (start/stop/logs/chains) |
 | `sync_channels.py` | Download channel list (run manually if needed) |
 | `sync_messages.py` | Download messages (run manually if needed) |
+| `sync_history.py` | Download historical messages for archived channels |
 | `download_telegraph.py` | Download telegra.ph pages |
+| `index_search.py` | Index messages for full-text search |
 | `cleanup.py` | Remove old messages from non-archived channels |
-| `fix_media_paths.py` | Fix misplaced media files (use --dry-run first) |
+
+### Orchestrator
+
+Run `uv run python orchestrator.py` for a terminal UI that manages all scripts:
+
+- **Navigate**: `↑/↓` or `j/k` to select scripts (logs auto-update)
+- **Control**: `Enter`/`s` to start, `x` to stop, `a` to start all daemons
+- **Chains**: `F1` for sync chain, `F2` for maintenance chain (sequential loops)
+- **Quit**: `q` stops all scripts and exits
 
 ## Configuration Options
+
+### Telegram Credentials
+
+There are two ways to configure Telegram credentials:
+
+1. **Database (recommended for daemon)**: Run `uv run python setup_creds.py` to add credentials interactively. Supports multiple accounts.
+
+2. **Environment file (fallback)**: Used when daemon is not running. Create `.env` with `API_ID`, `API_HASH`, `PHONE_NUMBER`.
 
 ### Environment Variables (.env)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `API_ID` | Telegram API ID | Required |
-| `API_HASH` | Telegram API Hash | Required |
-| `PHONE_NUMBER` | Your phone number | Required |
+| `API_ID` | Telegram API ID (fallback) | Required* |
+| `API_HASH` | Telegram API Hash (fallback) | Required* |
+| `PHONE_NUMBER` | Your phone number (fallback) | Required* |
 | `TG_DAEMON_HOST` | Daemon host | `127.0.0.1` |
 | `TG_DAEMON_PORT` | Daemon port | `9876` |
 | `MISTRAL_API_KEY` | API key for content deduplication | Optional |
 | `MISTRAL_MODEL` | Mistral model name | `mistral-small-latest` |
 | `DEDUP_MIN_MESSAGE_LENGTH` | Min message length for dedup | `50` |
 | `DEDUP_MESSAGES_PER_RUN` | Messages to process per run | `100` |
+
+*Required only if not using daemon with database credentials.
 
 ### Channel Settings (via Web UI)
 
@@ -230,7 +269,6 @@ Make sure `daemon.sh` or `daemon.bat` is running before starting sync.
 ### Media not loading (404 errors)
 1. Check that the file exists in `data/media/{channel_id}/`
 2. Restart the web server
-3. Run `fix_media_paths.py --dry-run` to check for misplaced files
 
 ### Messages not syncing
 1. Ensure the channel is marked as "Active" in the sidebar

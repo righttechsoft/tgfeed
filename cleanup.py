@@ -9,7 +9,11 @@ from pathlib import Path
 from config import MEDIA_DIR, validate_config
 from database import Database
 
-# Configure logging
+# Configure logging with UTF-8 support for Windows
+import io
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -59,17 +63,32 @@ def cleanup_old_messages() -> None:
             with Database() as db:
                 cursor = db.conn.cursor()
 
-                # First, get media paths for messages we're about to delete
+                # Check if table exists
+                cursor.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (table_name,)
+                )
+                if not cursor.fetchone():
+                    # Table doesn't exist - channel has no messages yet
+                    continue
+
+                # First, get IDs and media paths for messages we're about to delete
                 cursor.execute(f"""
                     SELECT id, media_path FROM {table_name}
-                    WHERE date < ? AND media_path IS NOT NULL
+                    WHERE date < ?
                 """, (cutoff_date,))
-                media_rows = cursor.fetchall()
+                old_messages = cursor.fetchall()
+
+                if not old_messages:
+                    continue
+
+                # Collect message IDs for FTS cleanup
+                message_ids = [row["id"] for row in old_messages]
 
                 # Delete the media files
                 files_deleted = 0
                 bytes_freed = 0
-                for row in media_rows:
+                for row in old_messages:
                     media_path = row["media_path"]
                     if media_path:
                         full_path = MEDIA_DIR / media_path
@@ -82,6 +101,14 @@ def cleanup_old_messages() -> None:
                             except OSError as e:
                                 logger.warning(f"  Failed to delete {full_path}: {e}")
 
+                # Delete from FTS index
+                placeholders = ",".join("?" * len(message_ids))
+                cursor.execute(f"""
+                    DELETE FROM messages_fts
+                    WHERE channel_id = ? AND message_id IN ({placeholders})
+                """, [channel_id] + message_ids)
+                fts_deleted = cursor.rowcount
+
                 # Delete old messages from database
                 cursor.execute(f"""
                     DELETE FROM {table_name} WHERE date < ?
@@ -91,9 +118,10 @@ def cleanup_old_messages() -> None:
                 db.commit()
 
                 if messages_deleted > 0 or files_deleted > 0:
+                    fts_info = f", {fts_deleted} FTS entries" if fts_deleted > 0 else ""
                     logger.info(
                         f"  {channel_title}: deleted {messages_deleted} messages, "
-                        f"{files_deleted} files ({bytes_freed / 1024 / 1024:.1f} MB)"
+                        f"{files_deleted} files ({bytes_freed / 1024 / 1024:.1f} MB){fts_info}"
                     )
                     total_messages_deleted += messages_deleted
                     total_files_deleted += files_deleted

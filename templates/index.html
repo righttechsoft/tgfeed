@@ -1026,6 +1026,133 @@
             fill: white;
         }
 
+        /* Search button and input */
+        .header-search-container {
+            display: flex;
+            align-items: center;
+            margin-left: 8px;
+            flex-shrink: 0;
+        }
+
+        .header-search-btn {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 20px;
+            cursor: pointer;
+            padding: 8px;
+            border-radius: 4px;
+        }
+
+        .header-search-btn:hover {
+            background: rgba(255,255,255,0.1);
+        }
+
+        .header-search-btn.active {
+            background: rgba(255,255,255,0.2);
+        }
+
+        .search-icon {
+            width: 20px;
+            height: 20px;
+            fill: none;
+            stroke: white;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .header-search-input {
+            width: 0;
+            padding: 0;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            background: rgba(255,255,255,0.9);
+            color: #333;
+            transition: width 0.3s ease, padding 0.3s ease;
+            outline: none;
+        }
+
+        .header-search-input.expanded {
+            width: 200px;
+            padding: 8px 12px;
+            margin-left: 8px;
+        }
+
+        .header-search-input::placeholder {
+            color: #888;
+        }
+
+        .search-close-btn {
+            display: none;
+            background: none;
+            border: none;
+            color: white;
+            font-size: 18px;
+            cursor: pointer;
+            padding: 4px 8px;
+            margin-left: 4px;
+        }
+
+        .search-close-btn.visible {
+            display: block;
+        }
+
+        .search-scope-select {
+            display: none;
+            padding: 6px 8px;
+            border: none;
+            border-radius: 4px;
+            font-size: 12px;
+            background: rgba(255,255,255,0.9);
+            color: #333;
+            margin-left: 4px;
+            cursor: pointer;
+            outline: none;
+        }
+
+        .search-scope-select.visible {
+            display: block;
+        }
+
+        /* Search results header */
+        .search-results-header {
+            padding: 12px 16px;
+            background: #fff3cd;
+            border-bottom: 1px solid #ffc107;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .search-results-info {
+            font-size: 14px;
+            color: #856404;
+        }
+
+        .search-results-clear {
+            background: none;
+            border: 1px solid #856404;
+            color: #856404;
+            padding: 4px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+
+        .search-results-clear:hover {
+            background: #856404;
+            color: white;
+        }
+
+        /* Search snippet highlight */
+        .message-card mark {
+            background: #fff3cd;
+            padding: 1px 2px;
+            border-radius: 2px;
+        }
+
         /* Channel stats */
         .channel-stats {
             display: flex;
@@ -1492,6 +1619,19 @@
         <button class="header-bookmark-btn" id="bookmarkBtn" title="Bookmarks">
             <svg class="bookmark-icon" viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>
         </button>
+        <div class="header-search-container">
+            <button class="header-search-btn" id="searchBtn" title="Search">
+                <svg class="search-icon" viewBox="0 0 24 24">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+            </button>
+            <input type="text" class="header-search-input" id="searchInput" placeholder="Search messages...">
+            <select class="search-scope-select" id="searchScopeSelect">
+                <option value="all">All channels</option>
+            </select>
+            <button class="search-close-btn" id="searchCloseBtn">&times;</button>
+        </div>
     </header>
 
     <div class="sidebar-overlay" id="sidebarOverlay"></div>
@@ -1558,11 +1698,34 @@
         let currentGroupId = null;
         let currentChannelId = null;  // Filter to single channel
         let showingBookmarks = false;
+        let showingSearch = false;  // Track if showing search results
+        let currentSearchQuery = '';  // Current search query
         let messages = [];
         let readMessages = new Set();
         let earliestDate = null;
         let loadingEarlier = false;
         let noMoreEarlierMessages = false;
+
+        // Search elements
+        const searchBtn = document.getElementById('searchBtn');
+        const searchInput = document.getElementById('searchInput');
+        const searchCloseBtn = document.getElementById('searchCloseBtn');
+        const searchScopeSelect = document.getElementById('searchScopeSelect');
+
+        // Update search scope options based on current context
+        function updateSearchScopeOptions() {
+            const currentGroup = groups.find(g => g.id === currentGroupId);
+            const currentChannel = channels.find(c => c.id === currentChannelId);
+
+            let html = '<option value="all">All channels</option>';
+            if (currentGroup) {
+                html += `<option value="group" selected>Group: ${escapeHtml(currentGroup.name)}</option>`;
+            }
+            if (currentChannel) {
+                html += `<option value="channel"${!currentGroup ? ' selected' : ''}>Channel: ${escapeHtml(currentChannel.title)}</option>`;
+            }
+            searchScopeSelect.innerHTML = html;
+        }
 
         // URL parameter handling
         function updateUrl() {
@@ -1570,6 +1733,7 @@
             if (currentGroupId) params.set('group', currentGroupId);
             if (currentChannelId) params.set('channel', currentChannelId);
             if (showingBookmarks) params.set('bookmarks', '1');
+            if (showingSearch && currentSearchQuery) params.set('search', currentSearchQuery);
             const newUrl = params.toString() ? `?${params.toString()}` : window.location.pathname;
             history.replaceState(null, '', newUrl);
         }
@@ -1579,8 +1743,19 @@
             const groupId = params.get('group');
             const channelId = params.get('channel');
             const bookmarks = params.get('bookmarks');
+            const searchQuery = params.get('search');
 
-            if (bookmarks === '1') {
+            if (searchQuery) {
+                currentGroupId = groupId ? parseInt(groupId) : null;
+                currentChannelId = channelId ? parseInt(channelId) : null;
+                searchInput.value = searchQuery;
+                searchInput.classList.add('expanded');
+                updateSearchScopeOptions();
+                searchScopeSelect.classList.add('visible');
+                searchCloseBtn.classList.add('visible');
+                searchBtn.classList.add('active');
+                performSearch();
+            } else if (bookmarks === '1') {
                 loadBookmarks();
             } else if (groupId) {
                 currentGroupId = parseInt(groupId);
@@ -1916,7 +2091,7 @@
             const unreadCounts = getGroupUnreadCounts();
             let html = '';
             groups.forEach(group => {
-                const activeClass = currentGroupId === group.id && !showingBookmarks ? 'active' : '';
+                const activeClass = currentGroupId === group.id && !showingBookmarks && !showingSearch ? 'active' : '';
                 const unread = unreadCounts[group.id] || 0;
                 const badgeClass = unread === 0 ? 'group-badge zero' : 'group-badge';
                 html += `<button class="group-tab ${activeClass}" data-group-id="${group.id}">
@@ -1925,8 +2100,8 @@
                 </button>`;
             });
 
-            // Show clear filter button if a channel is selected
-            if (currentChannelId) {
+            // Show clear filter button if a channel is selected (not during search)
+            if (currentChannelId && !showingSearch) {
                 const channel = channels.find(c => c.id === currentChannelId);
                 const channelName = channel ? channel.title : 'Channel';
                 html += `<button class="clear-filter-btn" id="clearFilterBtn">&times; ${escapeHtml(channelName)}</button>`;
@@ -1935,7 +2110,7 @@
             groupTabs.innerHTML = html;
 
             // Update bookmark button state
-            bookmarkBtn.classList.toggle('active', showingBookmarks);
+            bookmarkBtn.classList.toggle('active', showingBookmarks && !showingSearch);
 
             // Add click handlers
             document.querySelectorAll('.group-tab').forEach(tab => {
@@ -1952,8 +2127,16 @@
         // Load bookmarks
         async function loadBookmarks() {
             showingBookmarks = true;
+            showingSearch = false;
+            currentSearchQuery = '';
             currentGroupId = null;
             currentChannelId = null;
+            // Reset search UI
+            searchInput.classList.remove('expanded');
+            searchInput.value = '';
+            searchScopeSelect.classList.remove('visible');
+            searchCloseBtn.classList.remove('visible');
+            searchBtn.classList.remove('active');
             renderGroupTabs();
             updateUrl();
             mainContent.innerHTML = '<div class="placeholder"><p>Loading bookmarks...</p></div>';
@@ -1970,11 +2153,215 @@
         // Bookmark header button click
         bookmarkBtn.addEventListener('click', loadBookmarks);
 
+        // Search functionality
+        searchBtn.addEventListener('click', toggleSearch);
+        searchCloseBtn.addEventListener('click', closeSearch);
+
+        searchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                performSearch();
+            } else if (e.key === 'Escape') {
+                closeSearch();
+            }
+        });
+
+        function toggleSearch() {
+            const isExpanded = searchInput.classList.contains('expanded');
+            if (isExpanded) {
+                if (searchInput.value.trim()) {
+                    performSearch();
+                } else {
+                    closeSearch();
+                }
+            } else {
+                // Expand search input
+                updateSearchScopeOptions();
+                searchInput.classList.add('expanded');
+                searchScopeSelect.classList.add('visible');
+                searchCloseBtn.classList.add('visible');
+                searchBtn.classList.add('active');
+                searchInput.focus();
+            }
+        }
+
+        function closeSearch() {
+            searchInput.classList.remove('expanded');
+            searchScopeSelect.classList.remove('visible');
+            searchCloseBtn.classList.remove('visible');
+            searchBtn.classList.remove('active');
+            searchInput.value = '';
+
+            // If we were showing search results, go back to previous view
+            if (showingSearch) {
+                showingSearch = false;
+                currentSearchQuery = '';
+                if (currentGroupId) {
+                    loadGroupMessages(currentGroupId);
+                } else if (showingBookmarks) {
+                    loadBookmarks();
+                } else {
+                    mainContent.innerHTML = '<div class="placeholder"><p>Select a group from the header to view messages</p></div>';
+                }
+            }
+        }
+
+        async function performSearch() {
+            const query = searchInput.value.trim();
+            if (query.length < 3) {
+                alert('Search query must be at least 3 characters');
+                return;
+            }
+
+            currentSearchQuery = query;
+            showingSearch = true;
+            showingBookmarks = false;
+            renderGroupTabs();
+            updateUrl();
+
+            mainContent.innerHTML = '<div class="placeholder"><p>Searching...</p></div>';
+
+            try {
+                let url = `/api/search?q=${encodeURIComponent(query)}&limit=100`;
+                const scope = searchScopeSelect.value;
+                if (scope === 'group' && currentGroupId) {
+                    url += `&group=${currentGroupId}`;
+                } else if (scope === 'channel' && currentChannelId) {
+                    url += `&channel=${currentChannelId}`;
+                }
+                // scope === 'all' means no filter
+
+                const res = await fetch(url);
+                const data = await res.json();
+
+                if (data.error) {
+                    mainContent.innerHTML = `<div class="placeholder"><p>${escapeHtml(data.error)}</p></div>`;
+                    return;
+                }
+
+                messages = data.results || [];
+
+                if (messages.length === 0) {
+                    // Build scope description for no results
+                    const scope = searchScopeSelect.value;
+                    let scopeText = '';
+                    if (scope === 'group' && currentGroupId) {
+                        const group = groups.find(g => g.id === currentGroupId);
+                        scopeText = group ? ` in "${escapeHtml(group.name)}"` : '';
+                    } else if (scope === 'channel' && currentChannelId) {
+                        const channel = channels.find(c => c.id === currentChannelId);
+                        scopeText = channel ? ` in "${escapeHtml(channel.title)}"` : '';
+                    }
+
+                    mainContent.innerHTML = `
+                        <div class="search-results-header">
+                            <span class="search-results-info">No results for "${escapeHtml(query)}"${scopeText}</span>
+                            <button class="search-results-clear" id="noResultsClearBtn">Clear search</button>
+                        </div>
+                        <div class="placeholder"><p>No messages found</p></div>
+                    `;
+                    document.getElementById('noResultsClearBtn').addEventListener('click', closeSearch);
+                } else {
+                    renderSearchResults(query);
+                }
+            } catch (e) {
+                console.error('Search failed:', e);
+                mainContent.innerHTML = `<div class="placeholder"><p>Search failed: ${escapeHtml(e.message || String(e))}</p></div>`;
+            }
+        }
+
+        function highlightSearchTerms(container, query) {
+            // Highlight search terms in message text elements
+            if (!query || query.length < 3) return;
+            const textElements = container.querySelectorAll('.message-text');
+            const queryLower = query.toLowerCase();
+            textElements.forEach(el => {
+                // Walk text nodes and highlight matches
+                const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null, false);
+                const nodesToReplace = [];
+                while (walker.nextNode()) {
+                    const node = walker.currentNode;
+                    const text = node.textContent;
+                    const textLower = text.toLowerCase();
+                    if (textLower.includes(queryLower)) {
+                        nodesToReplace.push(node);
+                    }
+                }
+                nodesToReplace.forEach(node => {
+                    const text = node.textContent;
+                    const textLower = text.toLowerCase();
+                    const idx = textLower.indexOf(queryLower);
+                    if (idx === -1) return;
+                    const before = text.slice(0, idx);
+                    const match = text.slice(idx, idx + query.length);
+                    const after = text.slice(idx + query.length);
+                    const span = document.createElement('span');
+                    span.innerHTML = escapeHtml(before) + '<mark>' + escapeHtml(match) + '</mark>' + escapeHtml(after);
+                    node.parentNode.replaceChild(span, node);
+                });
+            });
+        }
+
+        function renderSearchResults(query) {
+            const feed = document.createElement('div');
+            feed.className = 'feed';
+
+            // Build scope description
+            const scope = searchScopeSelect.value;
+            let scopeText = '';
+            if (scope === 'group' && currentGroupId) {
+                const group = groups.find(g => g.id === currentGroupId);
+                scopeText = group ? ` in "${escapeHtml(group.name)}"` : '';
+            } else if (scope === 'channel' && currentChannelId) {
+                const channel = channels.find(c => c.id === currentChannelId);
+                scopeText = channel ? ` in "${escapeHtml(channel.title)}"` : '';
+            }
+
+            // Add search results header
+            const header = document.createElement('div');
+            header.className = 'search-results-header';
+            header.innerHTML = `
+                <span class="search-results-info">Found ${messages.length} result${messages.length !== 1 ? 's' : ''} for "${escapeHtml(query)}"${scopeText}</span>
+                <button class="search-results-clear">Clear search</button>
+            `;
+            header.querySelector('.search-results-clear').addEventListener('click', closeSearch);
+
+            mainContent.innerHTML = '';
+            mainContent.appendChild(header);
+            mainContent.appendChild(feed);
+
+            messages.forEach((msg, idx) => {
+                try {
+                    feed.innerHTML += renderMessage(msg);
+                } catch (e) {
+                    console.error(`Failed to render message ${idx}:`, msg, e);
+                }
+            });
+
+            // Highlight search terms in message text
+            try {
+                highlightSearchTerms(feed, query);
+            } catch (e) {
+                console.error('Failed to highlight search terms:', e);
+            }
+
+            // Setup handlers for the new messages
+            setupScrollObserver();
+            setupActionButtons();
+        }
+
         // Select a group and load its messages
         async function selectGroup(groupId, channelId = null) {
             showingBookmarks = false;
+            showingSearch = false;
+            currentSearchQuery = '';
             currentGroupId = groupId;
             currentChannelId = channelId;
+            // Reset search UI
+            searchInput.classList.remove('expanded');
+            searchInput.value = '';
+            searchScopeSelect.classList.remove('visible');
+            searchCloseBtn.classList.remove('visible');
+            searchBtn.classList.remove('active');
             renderGroupTabs();
             renderChannels();  // Update selected state
             updateUrl();

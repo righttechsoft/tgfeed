@@ -316,6 +316,82 @@ def get_bookmarks():
         return json.dumps(messages)
 
 
+@app.route("/api/search")
+def search_messages():
+    """Search messages using full-text search.
+
+    Query parameters:
+        q: Search query (required, min 3 characters)
+        limit: Max results (default 50, max 200)
+        channel: Optional channel ID filter
+        group: Optional group ID filter
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    response.content_type = "application/json; charset=utf-8"
+
+    # Parse query string manually to ensure proper UTF-8 decoding
+    query_string = request.query_string
+    if isinstance(query_string, bytes):
+        query_string = query_string.decode('utf-8')
+    params = parse_qs(query_string, encoding='utf-8')
+
+    query = params.get("q", [""])[0].strip()
+    logger.info(f"[search] Query string: {query_string}, Parsed query: {repr(query)}")
+
+    if not query:
+        return json.dumps({"error": "Query parameter 'q' is required", "results": []})
+    if len(query) < 3:
+        return json.dumps({"error": "Query must be at least 3 characters", "results": []})
+
+    limit = min(int(params.get("limit", [50])[0]), 200)
+    channel_id = params.get("channel", [None])[0]
+    channel_id = int(channel_id) if channel_id else None
+    group_id = params.get("group", [None])[0]
+    group_id = int(group_id) if group_id else None
+
+    with Database() as db:
+        # Log index stats for debugging
+        stats = db.get_search_index_stats()
+        logger.info(f"[search] Query: '{query}', Index stats: {stats}")
+
+        results = db.search_messages(query, limit, channel_id, group_id)
+        logger.info(f"[search] Found {len(results)} results")
+
+        # Fetch full message data for each result
+        enriched_results = []
+        for result in results:
+            msg = db.get_message(result["channel_id"], result["message_id"])
+            if msg:
+                msg["channel_title"] = result["channel_title"]
+                msg["channel_id"] = result["channel_id"]
+                msg["search_query"] = query  # Pass query for frontend highlighting
+                # Handle media items for consistency with other endpoints
+                if msg.get("media_path"):
+                    msg["media_items"] = [{
+                        "path": msg["media_path"],
+                        "type": msg.get("media_type"),
+                        "message_id": msg["id"],
+                        "video_thumbnail_path": msg.get("video_thumbnail_path")
+                    }]
+                else:
+                    msg["media_items"] = []
+                msg["is_album"] = False
+                msg["album_message_ids"] = [msg["id"]]
+                enriched_results.append(msg)
+
+        return json.dumps({"results": enriched_results, "query": query})
+
+
+@app.route("/api/search/stats")
+def search_stats():
+    """Get search index statistics."""
+    response.content_type = "application/json"
+    with Database() as db:
+        stats = db.get_search_index_stats()
+        return json.dumps(stats)
+
+
 def main():
     """Run the web server."""
     print("Starting TGFeed Web UI at http://localhost:8910")

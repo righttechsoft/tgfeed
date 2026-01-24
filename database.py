@@ -44,7 +44,7 @@ class DatabaseMigration:
     def _migrate_channel_tables(self, cursor) -> None:
         """Add missing columns to all existing channel_* tables."""
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'channel_%'")
-        tables = [row[0] for row in cursor.fetchall()]
+        tables = [row[0] for row in cursor.fetchall() if not row[0].startswith("channel_backup_hash_")]
 
         columns_to_add = [
             ("media_path", "TEXT"),
@@ -79,6 +79,9 @@ class DatabaseMigration:
 
         # Create tg_creds table for Telegram daemon
         self._create_tg_creds_table(cursor)
+
+        # Create FTS5 table for full-text search
+        self._create_fts_table(cursor)
 
     def _create_index_if_not_exists(self, cursor, table_name: str, index_suffix: str, columns: list[str]) -> None:
         """Create an index if it doesn't exist. Skips if any column doesn't exist."""
@@ -153,6 +156,32 @@ class DatabaseMigration:
                 "primary" INTEGER DEFAULT 0 NOT NULL
             )
         """)
+
+    def _create_fts_table(self, cursor) -> None:
+        """Create FTS5 virtual table for full-text search with trigram tokenizer."""
+        # Check if FTS5 table already exists
+        cursor.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='messages_fts'"
+        )
+        row = cursor.fetchone()
+        if row is not None:
+            # Check if it's the broken contentless version - need to drop and recreate
+            if "content=''" in row[0].lower():
+                logger.info("Dropping broken contentless FTS5 table (UNINDEXED columns don't work in contentless mode)...")
+                cursor.execute("DROP TABLE messages_fts")
+            else:
+                # Already correct version, nothing to do
+                return
+
+        cursor.execute("""
+            CREATE VIRTUAL TABLE messages_fts USING fts5(
+                channel_id UNINDEXED,
+                message_id UNINDEXED,
+                message,
+                tokenize="trigram"
+            )
+        """)
+        logger.info("Created FTS5 search index table")
 
 
 class Database:
@@ -733,7 +762,7 @@ class Database:
         """Get all bookmarked messages from all channels, sorted by date descending."""
         cursor = self.conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'channel_%'")
-        tables = [row[0] for row in cursor.fetchall()]
+        tables = [row[0] for row in cursor.fetchall() if not row[0].startswith("channel_backup_hash_")]
 
         cursor.execute("SELECT id, title FROM channels")
         channel_titles = {row[0]: row[1] for row in cursor.fetchall()}
@@ -986,6 +1015,227 @@ class Database:
         cursor = self.conn.cursor()
         cursor.execute('UPDATE tg_creds SET "primary" = 0 WHERE "primary" = 1')
         cursor.execute('UPDATE tg_creds SET "primary" = 1 WHERE id = ?', (cred_id,))
+
+    # Full-text search methods
+
+    def search_messages(self, query: str, limit: int = 50, channel_id: int | None = None,
+                        group_id: int | None = None) -> list[dict]:
+        """Search messages using FTS5 trigram index (contentless mode).
+
+        Args:
+            query: Search query (min 3 characters for trigram matching)
+            limit: Maximum number of results
+            channel_id: Optional channel filter
+            group_id: Optional group filter (searches all channels in group)
+
+        Returns:
+            List of dicts with channel_id, message_id, channel_title.
+            Note: No snippet available in contentless mode - fetch full message separately.
+        """
+        if not query or len(query) < 3:
+            return []
+
+        cursor = self.conn.cursor()
+
+        # Get channel titles for results
+        cursor.execute("SELECT id, title FROM channels")
+        channel_titles = {row[0]: row[1] for row in cursor.fetchall()}
+
+        # Get channel IDs to filter by
+        allowed_channels = None
+        if group_id is not None:
+            channels = self.get_channels_by_group(group_id)
+            allowed_channels = {c["id"] for c in channels}
+        elif channel_id is not None:
+            allowed_channels = {channel_id}
+
+        # For trigram tokenizer, the query is used as-is for substring matching
+        # No need for special quoting - trigram handles partial matches naturally
+        safe_query = query
+
+        logger.info(f"[search_messages] Starting search for: '{query}'")
+        logger.info(f"[search_messages] allowed_channels: {allowed_channels}")
+
+        try:
+            if allowed_channels:
+                placeholders = ",".join("?" * len(allowed_channels))
+                sql = f"""
+                    SELECT channel_id, message_id
+                    FROM messages_fts
+                    WHERE messages_fts MATCH ?
+                    AND channel_id IN ({placeholders})
+                    LIMIT ?
+                """
+                params = (safe_query, *allowed_channels, limit)
+                logger.info(f"[search_messages] SQL: {sql}")
+                logger.info(f"[search_messages] Params: {params}")
+                cursor.execute(sql, params)
+            else:
+                sql = """
+                    SELECT channel_id, message_id
+                    FROM messages_fts
+                    WHERE messages_fts MATCH ?
+                    LIMIT ?
+                """
+                params = (safe_query, limit)
+                logger.info(f"[search_messages] SQL: {sql}")
+                logger.info(f"[search_messages] Params: {params}")
+                cursor.execute(sql, params)
+
+            rows = cursor.fetchall()
+            logger.info(f"[search_messages] Query returned {len(rows)} rows")
+
+            results = []
+            for row in rows:
+                ch_id = row[0]
+                results.append({
+                    "channel_id": ch_id,
+                    "message_id": row[1],
+                    "channel_title": channel_titles.get(ch_id, "Unknown")
+                })
+            logger.info(f"[search_messages] Returning {len(results)} results")
+            return results
+        except sqlite3.Error as e:
+            logger.error(f"[search_messages] Search error: {e}", exc_info=True)
+            return []
+
+    def get_all_messages_for_indexing(self, channel_id: int) -> list[dict]:
+        """Get all messages with text content for search indexing."""
+        table_name = f"channel_{channel_id}"
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(f"""
+                SELECT id, message FROM {table_name}
+                WHERE message IS NOT NULL
+                AND length(message) >= 3
+                ORDER BY id
+            """)
+            return [{"id": row[0], "message": row[1]} for row in cursor.fetchall()]
+        except sqlite3.Error:
+            return []
+
+    def get_indexed_message_ids(self, channel_id: int) -> set[int]:
+        """Get all message IDs that are already in the FTS index for a channel."""
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT message_id FROM messages_fts WHERE channel_id = ?
+            """, (channel_id,))
+            return {row[0] for row in cursor.fetchall()}
+        except sqlite3.Error:
+            return set()
+
+    def index_message_for_search(self, channel_id: int, message_id: int, message: str) -> bool:
+        """Add a message to the FTS5 contentless search index.
+
+        Returns True if indexed successfully.
+        Note: In contentless mode, we just insert - duplicates will error.
+        """
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT INTO messages_fts(channel_id, message_id, message)
+                VALUES (?, ?, ?)
+            """, (channel_id, message_id, message))
+            return True
+        except sqlite3.Error as e:
+            # IntegrityError or similar if duplicate - that's OK
+            if "UNIQUE" in str(e).upper() or "constraint" in str(e).lower():
+                return True
+            logger.warning(f"Failed to index message {channel_id}/{message_id}: {e}")
+            return False
+
+    def index_messages_batch(self, channel_id: int, messages: list[dict]) -> int:
+        """Batch index messages into FTS5.
+
+        Args:
+            channel_id: Channel ID
+            messages: List of dicts with 'id' and 'message' keys
+
+        Returns:
+            Number of messages indexed
+        """
+        if not messages:
+            return 0
+        cursor = self.conn.cursor()
+        count = 0
+        for msg in messages:
+            try:
+                cursor.execute("""
+                    INSERT INTO messages_fts(channel_id, message_id, message)
+                    VALUES (?, ?, ?)
+                """, (channel_id, msg["id"], msg["message"]))
+                count += 1
+            except sqlite3.Error:
+                pass  # Skip duplicates or errors
+        return count
+
+    def get_search_index_stats(self) -> dict:
+        """Get statistics about the search index."""
+        cursor = self.conn.cursor()
+        stats = {"indexed_messages": 0, "table_exists": False}
+        try:
+            # Check if table exists and get schema
+            cursor.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='messages_fts'"
+            )
+            row = cursor.fetchone()
+            if row:
+                stats["table_exists"] = True
+                stats["is_contentless"] = "content=''" in row[0].lower()
+
+            cursor.execute("SELECT COUNT(*) FROM messages_fts")
+            stats["indexed_messages"] = cursor.fetchone()[0]
+
+            # Get sample of indexed channels
+            cursor.execute("""
+                SELECT DISTINCT channel_id FROM messages_fts LIMIT 5
+            """)
+            stats["sample_channels"] = [row[0] for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            stats["error"] = str(e)
+        return stats
+
+    def delete_from_search_index(self, channel_id: int, message_id: int, message: str) -> None:
+        """Remove a message from the FTS5 contentless search index.
+
+        Note: Contentless FTS5 requires providing the original content for deletion.
+        """
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT INTO messages_fts(messages_fts, channel_id, message_id, message)
+                VALUES('delete', ?, ?, ?)
+            """, (channel_id, message_id, message))
+        except sqlite3.Error:
+            pass
+
+    def clear_search_index(self) -> None:
+        """Clear the entire FTS5 search index (for rebuild)."""
+        cursor = self.conn.cursor()
+        try:
+            # Drop and recreate the FTS table
+            cursor.execute("DROP TABLE IF EXISTS messages_fts")
+            cursor.execute("""
+                CREATE VIRTUAL TABLE messages_fts USING fts5(
+                    channel_id UNINDEXED,
+                    message_id UNINDEXED,
+                    message,
+                    tokenize="trigram"
+                )
+            """)
+            logger.info("Cleared and recreated FTS5 search index")
+        except sqlite3.Error as e:
+            logger.warning(f"Failed to clear search index: {e}")
+
+    def optimize_search_index(self) -> None:
+        """Optimize the FTS5 index by merging b-trees."""
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("INSERT INTO messages_fts(messages_fts) VALUES('optimize')")
+            logger.info("Search index optimized")
+        except sqlite3.Error as e:
+            logger.warning(f"Failed to optimize search index: {e}")
 
     # Backup hash methods for media file matching
 

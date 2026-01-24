@@ -17,8 +17,9 @@ tgfeed/
 ├── download_telegraph.py  # Downloads telegra.ph pages with embedded images
 ├── generate_thumbnails.py # Creates video thumbnails (2x2 grid) using ffmpeg
 ├── generate_content_hashes.py # LLM-based content deduplication via Mistral API
+├── index_search.py        # Indexes messages for full-text search (FTS5)
 ├── cleanup.py             # Removes old messages from non-archived channels
-├── fix_media_paths.py     # Fixes misplaced media files (doubled channel_id paths)
+├── orchestrator.py        # TUI for managing all scripts (start/stop/logs)
 ├── web.py                 # Bottle web server for UI
 ├── templates/
 │   ├── index.html         # Single-page web application
@@ -29,6 +30,7 @@ tgfeed/
 │   ├── sessions/          # Per-credential session files (for daemon)
 │   ├── photos/            # Channel profile photos ({channel_id}.jpg)
 │   ├── media/             # Downloaded message media ({channel_id}/...)
+│   ├── logs/              # Error logs from orchestrator ({script}_{timestamp}.log)
 │   └── telegraph/         # Downloaded telegra.ph pages
 │       ├── css/           # Deduplicated CSS files (content-hashed)
 │       └── {channel_id}/  # HTML files per channel
@@ -77,6 +79,14 @@ For LLM-based content deduplication:
 - `message_id` (INTEGER)
 - `message_date` (INTEGER)
 - `created_at` (INTEGER)
+
+### `messages_fts` table (FTS5 virtual table)
+Full-text search index using SQLite FTS5 with trigram tokenizer:
+- `channel_id` (UNINDEXED) - Channel ID for filtering
+- `message_id` (UNINDEXED) - Message ID within channel
+- `message` - Indexed message text (trigram tokenized)
+
+The trigram tokenizer enables substring matching (e.g., searching "gram" finds "telegram"). Minimum query length is 3 characters. Search returns channel_id/message_id pairs, and full message data is fetched from channel_* tables.
 
 ### `channel_backup_hash_{id}` tables (dynamic)
 Per-channel backup file index for media recovery:
@@ -147,6 +157,7 @@ Centralized long-running process that manages Telegram connections:
 - `get_messages` - Get specific messages by ID
 - `download_media` - Download media file
 - `download_profile_photo` - Download channel photo
+- `get_media_hash` - Download first 64KB of media and return MD5 hash (for backup matching)
 - `send_read_acknowledge` - Mark messages as read in Telegram
 
 ### RPC Client (tg_client.py)
@@ -197,9 +208,11 @@ Async client library for communicating with tg_daemon:
 
 **Backup media recovery:**
 If channel has `backup_path` set (pointing to Telegram Desktop export):
-- Scans backup folder and indexes files by hash (first 64KB)
-- For large files (>64KB): downloads from Telegram, computes hash, checks backup
-- If hash matches backup file: deletes download, copies from backup instead
+- Scans backup folder and indexes files by hash (MD5 of first 64KB)
+- For large files (>64KB): uses `get_media_hash` RPC to download only first 64KB
+- Computes hash and checks backup index for matching file
+- If hash matches: copies from backup (no full download needed)
+- If no match: downloads full file from Telegram
 - Small files (≤64KB): downloaded directly without hash matching
 
 ### sync_read_to_tg.py
@@ -233,22 +246,25 @@ LLM-based content deduplication using Mistral API:
 4. Stores hash in message table and registers in `content_hashes` lookup table
 5. If hash already exists, marks message as duplicate of the original
 
+### index_search.py
+Full-text search indexing using SQLite FTS5:
+1. Creates FTS5 virtual table with trigram tokenizer
+2. Iterates all active channels
+3. Compares messages in channel tables vs FTS index
+4. Indexes new messages (no tracking column needed - checks FTS directly)
+5. Optional `--optimize` flag to merge FTS5 b-trees for better performance
+6. Optional `--rebuild` flag to clear and rebuild entire index from scratch
+
+Run periodically (e.g., in sync_service) to keep search index up to date.
+
 ### cleanup.py
 Removes old messages to save disk space:
 1. For channels without `download_all=1`:
    - Delete messages older than 30 days
    - Delete associated media files
+   - Remove entries from FTS search index
    - Remove empty media directories
 2. Channels with `download_all=1` are preserved
-
-### fix_media_paths.py
-Fixes media files that were placed in wrong directory (doubled channel_id):
-1. Scans for `data/media/{channel_id}/{channel_id}/` directories
-2. Moves files to correct location `data/media/{channel_id}/`
-3. Updates database `media_path` column
-4. Removes empty doubled directories
-
-Run with `--dry-run` to preview changes without applying them.
 
 ## Web UI Architecture
 
@@ -265,6 +281,8 @@ Bottle framework with Waitress server (multi-threaded for concurrent requests).
 - `GET /api/group/{id}/earlier?before=TIMESTAMP&limit=N&channel=ID` - Earlier (read) messages
 - `GET /api/message/{channel_id}/{message_id}` - Single message by ID
 - `GET /api/bookmarks?limit=N` - All bookmarked messages (newest first)
+- `GET /api/search?q=QUERY&limit=N&channel=ID&group=ID` - Full-text search (min 3 chars)
+- `GET /api/search/stats` - Search index statistics
 - `POST /api/channel/{id}/active` - Toggle message downloading
 - `POST /api/channel/{id}/group` - Set channel's group
 - `POST /api/channel/{id}/download_all` - Toggle history download
@@ -289,7 +307,7 @@ Bottle framework with Waitress server (multi-threaded for concurrent requests).
 Single-page app with vanilla JavaScript. No build step.
 
 **Layout:**
-- Header: Group tabs with unread badges + bookmark button
+- Header: Group tabs with unread badges + bookmark button + search button
 - Sidebar (burger menu): Channel list with toggles
 - Main: Message feed with skip buttons
 
@@ -299,7 +317,14 @@ Single-page app with vanilla JavaScript. No build step.
 - Group tabs filter messages by channel group
 - Unread counts displayed as badges on group tabs
 - Click channel name in message to filter to that channel
-- URL state preserved (`?group=ID&channel=ID`)
+- URL state preserved (`?group=ID&channel=ID&search=QUERY`)
+
+*Search:*
+- Click magnifying glass icon in header to expand search input
+- Searches message text using FTS5 trigram index (substring matching)
+- Minimum query length: 3 characters
+- Results show matching messages with highlighted snippets
+- Can search within current group or across all channels
 
 *Channel management (sidebar):*
 - Active toggle - enable/disable message downloading
@@ -404,18 +429,41 @@ web.bat
 # Open http://localhost:8910
 ```
 
-**Individual scripts:**
+**Orchestrator (TUI for managing all scripts):**
 ```bash
-python sync_channels.py        # Sync channel list
-python sync_messages.py        # Sync new messages
-python sync_history.py         # Download historical messages
-python sync_read_to_tg.py      # Sync read status to Telegram
-python download_telegraph.py   # Download telegra.ph pages
-python generate_thumbnails.py  # Generate video thumbnails
-python generate_content_hashes.py  # Generate AI summaries for deduplication
-python cleanup.py              # Clean up old messages
-python fix_media_paths.py --dry-run  # Preview media path fixes
-python fix_media_paths.py      # Apply media path fixes
+uv run python orchestrator.py
+```
+The orchestrator provides a terminal UI to start/stop scripts, view their status and logs. Scripts can be run in any order manually. When a script fails (non-zero exit code), full logs are saved to `data/logs/{script}_{timestamp}.log`.
+
+**Orchestrator controls:**
+- `↑/↓` or `j/k` - Navigate scripts (auto-shows logs for selected script)
+- `Enter` or `s` - Start selected script
+- `x` - Stop selected script
+- `l` - Toggle log view
+- `a` - Start all daemons
+- `F1` - Toggle sync chain (read-sync → channels → messages → telegraph, loops)
+- `F2` - Toggle maintenance chain (thumbnails → hashes → search → cleanup, loops)
+- `q` - Quit (stops all scripts)
+
+**Script status indicators:**
+- `Running` (green) - Script is currently executing
+- `Completed` (cyan) - Script finished successfully (exit code 0)
+- `Failed (N)` (red) - Script crashed with exit code N, log saved to file
+- `Stopped` (dim) - Script not running
+
+**Individual scripts (use `uv run python` for all scripts):**
+```bash
+uv run python sync_channels.py        # Sync channel list
+uv run python sync_messages.py        # Sync new messages
+uv run python sync_history.py         # Download historical messages
+uv run python sync_read_to_tg.py      # Sync read status to Telegram
+uv run python download_telegraph.py   # Download telegra.ph pages
+uv run python generate_thumbnails.py  # Generate video thumbnails
+uv run python generate_content_hashes.py  # Generate AI summaries for deduplication
+uv run python index_search.py         # Index messages for full-text search
+uv run python index_search.py --optimize  # Index and optimize FTS5 index
+uv run python index_search.py --rebuild   # Rebuild entire search index from scratch
+uv run python cleanup.py              # Clean up old messages
 ```
 
 ## Dependencies
@@ -425,6 +473,7 @@ python fix_media_paths.py      # Apply media path fixes
 - waitress - Production WSGI server
 - python-dotenv - Environment configuration
 - requests - HTTP client (for telegraph downloads)
+- rich - Terminal UI for orchestrator
 - ffmpeg (system) - For video thumbnail generation (optional)
 - mistralai - For content deduplication (optional)
 
@@ -435,13 +484,14 @@ Migrations run automatically on sync. The `DatabaseMigration` class:
 2. Creates `groups` table if not exists
 3. Creates `tg_creds` table for daemon credentials
 4. Creates `content_hashes` table for deduplication
-5. Adds new columns to `channels` (`last_active`, `download_all`, `backup_path`)
-6. Adds new columns to all `channel_*` tables:
+5. Creates `messages_fts` FTS5 table for full-text search
+6. Adds new columns to `channels` (`last_active`, `download_all`, `backup_path`)
+7. Adds new columns to all `channel_*` tables:
    - `media_path`, `entities`, `read`, `rating`, `bookmarked`
    - `html_downloaded`, `media_pending`, `video_thumbnail_path`
    - `read_synced_to_tg`, `ai_summary`, `content_hash`, `content_hash_pending`
    - `duplicate_of_channel`, `duplicate_of_message`
-7. Creates indexes for efficient queries
+8. Creates indexes for efficient queries
 
 The `create_channel_messages_table()` method also handles migrations for individual channel tables, ensuring columns exist before creating indexes.
 

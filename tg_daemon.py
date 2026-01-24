@@ -8,11 +8,14 @@ import asyncio
 import hashlib
 import json
 import logging
-import shutil
 import signal
 import sys
 import time
 from pathlib import Path
+
+# Hash constants for backup matching
+HASH_SIZE_THRESHOLD = 64 * 1024  # Files > 64KB use hash matching
+HASH_CHUNK_SIZE = 64 * 1024  # Download first 64KB for hash
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
@@ -43,63 +46,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 logging.getLogger("telethon").setLevel(logging.WARNING)
-
-# Hash constants
-HASH_SIZE_THRESHOLD = 64 * 1024  # 64KB - files <= this size are matched by size only
-HASH_CHUNK_SIZE = 64 * 1024  # Hash first 64KB of larger files
-
-# Backup folder subfolders to scan
-BACKUP_SUBFOLDERS = ["photos", "files", "video_files"]
-
-
-def compute_file_hash(file_path: Path) -> str | None:
-    """Compute MD5 hash of first 64KB of a file.
-
-    For files <= 64KB, returns None (use size matching instead).
-    For files > 64KB, returns MD5 hash of first 64KB.
-    """
-    try:
-        file_size = file_path.stat().st_size
-        if file_size <= HASH_SIZE_THRESHOLD:
-            return None  # Small files don't need hash
-
-        with open(file_path, "rb") as f:
-            chunk = f.read(HASH_CHUNK_SIZE)
-            return hashlib.md5(chunk).hexdigest()
-    except Exception:
-        return None
-
-
-def scan_backup_folder(backup_path: str) -> list[tuple[str, int, str | None]]:
-    """Scan a backup folder and compute hashes for all files.
-
-    Scans subfolders: photos, files, video_files
-
-    Returns list of (file_path, file_size, hash) tuples.
-    Hash is None for files <= 64KB.
-    """
-    backup_dir = Path(backup_path)
-    if not backup_dir.exists():
-        return []
-
-    results = []
-    for subfolder in BACKUP_SUBFOLDERS:
-        folder_path = backup_dir / subfolder
-        if not folder_path.exists():
-            continue
-
-        for file_path in folder_path.rglob("*"):
-            if not file_path.is_file():
-                continue
-
-            try:
-                file_size = file_path.stat().st_size
-                file_hash = compute_file_hash(file_path)
-                results.append((str(file_path), file_size, file_hash))
-            except Exception as e:
-                logger.warning(f"Error scanning {file_path}: {e}")
-
-    return results
 
 
 def get_media_type(media) -> str | None:
@@ -152,17 +98,12 @@ def extract_entities(msg: Message) -> list[dict] | None:
 
 
 def get_media_file_size(msg: Message) -> int | None:
-    """Get the file size of media in a message.
-
-    Returns the file size in bytes, or None if cannot be determined.
-    """
+    """Get file size of media in a message."""
     if not msg.media:
         return None
 
     if isinstance(msg.media, MessageMediaPhoto):
-        # Photos have sizes array, get the largest
         if msg.media.photo and msg.media.photo.sizes:
-            # Find the largest size (PhotoSize has size attribute)
             for size in reversed(msg.media.photo.sizes):
                 if hasattr(size, "size"):
                     return size.size
@@ -173,120 +114,6 @@ def get_media_file_size(msg: Message) -> int | None:
         if doc and hasattr(doc, "size"):
             return doc.size
         return None
-
-    return None
-
-
-def get_expected_media_filename(msg: Message) -> str | None:
-    """Get the expected filename that Telethon would use for this message's media.
-
-    Telethon uses specific naming conventions:
-    - Photos: photo_{date}_{photo_id}.jpg
-    - Documents: uses file_name attribute if available
-    - Videos/Audio: uses file_name or generates based on attributes
-
-    Returns the expected filename, or None if cannot be determined.
-    """
-    if not msg.media:
-        return None
-
-    if isinstance(msg.media, MessageMediaPhoto):
-        # Photos are named: photo_{date}_{photo_id}.jpg
-        # Example: photo_2024-01-15_12-30-45_1234567890.jpg
-        if msg.media.photo and msg.date:
-            date_str = msg.date.strftime("%Y-%m-%d_%H-%M-%S")
-            return f"photo_{date_str}.jpg"
-        return None
-
-    if isinstance(msg.media, MessageMediaDocument):
-        doc = msg.media.document
-        if not doc:
-            return None
-
-        # Check for filename attribute
-        for attr in doc.attributes:
-            if type(attr).__name__ == "DocumentAttributeFilename":
-                return attr.file_name
-
-        # Fallback: Telethon generates names based on document ID and mime type
-        # This is less reliable but can help for some cases
-        return None
-
-    return None
-
-
-def find_file_in_backup_by_hash(channel_id: int, msg: Message,
-                                 downloaded_path: Path) -> str | None:
-    """Find a media file in backup using content hash matching.
-
-    Only used for large files (>64KB). Small files are downloaded directly.
-
-    Args:
-        channel_id: Channel ID for database lookup
-        msg: Telegram message containing media
-        downloaded_path: Path to downloaded file (for hash computation)
-
-    Returns the full path to the found backup file, or None.
-    """
-    if not downloaded_path or not downloaded_path.exists():
-        return None
-
-    # Compute hash of the downloaded file
-    file_hash = compute_file_hash(downloaded_path)
-    if not file_hash:
-        return None
-
-    with Database() as db:
-        match = db.find_backup_by_hash(channel_id, file_hash)
-        if match and Path(match).exists():
-            return match
-
-    return None
-
-
-def find_file_in_backup(backup_path: str, expected_filename: str, msg: Message) -> str | None:
-    """Search for a media file in the backup path (legacy filename-based method).
-
-    This is the fallback method when hash tables aren't populated.
-    Uses filename patterns to search.
-
-    Returns the full path to the found file, or None.
-    """
-    backup_dir = Path(backup_path)
-    if not backup_dir.exists():
-        return None
-
-    # Strategy 1: Exact filename match (recursive)
-    if expected_filename:
-        for path in backup_dir.rglob(expected_filename):
-            return str(path)
-
-    # Strategy 2: For photos, try matching by date pattern
-    if isinstance(msg.media, MessageMediaPhoto) and msg.date:
-        date_str = msg.date.strftime("%Y-%m-%d_%H-%M-%S")
-        # Look for photo_*.jpg files with matching date
-        for path in backup_dir.rglob(f"photo_{date_str}*.jpg"):
-            return str(path)
-        # Also try variations like photo_YYYYMMDD_HHMMSS format
-        date_str2 = msg.date.strftime("%Y%m%d_%H%M%S")
-        for path in backup_dir.rglob(f"*{date_str2}*.jpg"):
-            return str(path)
-
-    # Strategy 3: For documents with known filename, try partial match
-    if isinstance(msg.media, MessageMediaDocument):
-        doc = msg.media.document
-        if doc:
-            for attr in doc.attributes:
-                if type(attr).__name__ == "DocumentAttributeFilename":
-                    filename = attr.file_name
-                    # Try exact match first
-                    for path in backup_dir.rglob(filename):
-                        return str(path)
-                    # Try partial match (files might have prefixes/suffixes)
-                    base_name = Path(filename).stem
-                    ext = Path(filename).suffix
-                    for path in backup_dir.rglob(f"*{base_name}*{ext}"):
-                        return str(path)
 
     return None
 
@@ -629,18 +456,11 @@ class TelegramDaemon:
 
     async def _rpc_download_media(self, channel_id: int, access_hash: int,
                                   message_id: int, dest_dir: str,
-                                  client_id: int = None,
-                                  backup_path: str = None,
-                                  use_hash_matching: bool = True) -> dict:
+                                  client_id: int = None) -> dict:
         """Download media from a message.
 
-        If backup_path is provided, will check for the file there first before
-        downloading from Telegram. This is useful for channels with download_all
-        enabled that have local backups.
-
-        Hash matching strategy:
-        - Files <= 64KB: match by file size from database
-        - Files > 64KB: download first, compute hash, check database for match
+        Note: Backup handling is done in sync_history.py, not here.
+        The daemon only handles direct Telegram downloads.
         """
         client = self._get_client(client_id)
         input_channel = InputChannel(channel_id, access_hash)
@@ -659,77 +479,79 @@ class TelegramDaemon:
         channel_dest = dest_path / str(channel_id)
         channel_dest.mkdir(parents=True, exist_ok=True)
 
-        # Legacy filename-based backup matching (fallback when hash matching disabled)
-        if backup_path and not use_hash_matching:
-            expected_filename = get_expected_media_filename(msg)
-            backup_file = find_file_in_backup(backup_path, expected_filename, msg)
-
-            if backup_file:
-                # Copy the file from backup to media directory
-                src_path = Path(backup_file)
-                dest_file = channel_dest / src_path.name
-                try:
-                    if not dest_file.exists():
-                        shutil.copy2(backup_file, dest_file)
-                        logger.info(f"Copied from backup: {backup_file} -> {dest_file}")
-                    rel_path = f"{channel_id}/{src_path.name}"
-                    return {"path": rel_path, "from_backup": True}
-                except Exception as e:
-                    logger.warning(f"Failed to copy from backup: {e}, will download from Telegram")
-
         # Download from Telegram
         try:
-            media_size = get_media_file_size(msg)
-            size_str = f"{media_size:,} bytes" if media_size else "unknown size"
-            logger.debug(f"Downloading media for msg {message_id}: {size_str}")
-
             path = await client.download_media(msg, file=channel_dest)
             if path:
                 downloaded_path = Path(path)
-                actual_size = downloaded_path.stat().st_size
-
-                # For large files (>64KB) with backup enabled, check hash match
-                # Small files are just downloaded directly - no matching needed
-                if backup_path and use_hash_matching:
-                    if media_size is not None and media_size > HASH_SIZE_THRESHOLD:
-                        # Compute hash for backup matching
-                        file_hash = compute_file_hash(downloaded_path)
-
-                        with Database() as db:
-                            backup_count = db.get_backup_hash_count(channel_id)
-                            logger.info(f"Large file ({actual_size:,} bytes), hash={file_hash}, checking {backup_count} indexed backup files...")
-                            backup_match = db.find_backup_by_hash(channel_id, file_hash) if file_hash else None
-
-                        if file_hash and backup_match and Path(backup_match).exists():
-                            # Found match in backup - use backup file instead
-                            src_path = Path(backup_match)
-                            dest_file = channel_dest / src_path.name
-                            try:
-                                # Remove the downloaded file
-                                downloaded_path.unlink()
-                                # Copy from backup
-                                if not dest_file.exists():
-                                    shutil.copy2(backup_match, dest_file)
-                                logger.info(f"Hash match! Replaced with backup: {backup_match}")
-                                rel_path = f"{channel_id}/{src_path.name}"
-                                return {"path": rel_path, "from_backup": True}
-                            except Exception as e:
-                                logger.warning(f"Failed to use backup after hash match: {e}")
-                                # Fall through to use the downloaded file
-                        elif file_hash:
-                            logger.info(f"No backup match found for hash {file_hash}")
-                        else:
-                            logger.warning(f"Could not compute hash for {downloaded_path}")
-                    else:
-                        logger.debug(f"Small file ({actual_size:,} bytes <= {HASH_SIZE_THRESHOLD:,}), skipping backup check")
-
-                # Return relative path from MEDIA_DIR
                 rel_path = f"{channel_id}/{downloaded_path.name}"
                 return {"path": rel_path}
             return {"path": None, "error": "Download returned None"}
         except Exception as e:
             logger.error(f"Failed to download media: {e}")
             return {"path": None, "error": str(e)}
+
+    async def _rpc_get_media_hash(self, channel_id: int, access_hash: int,
+                                  message_id: int, client_id: int = None) -> dict:
+        """Get hash of first 64KB of media for backup matching.
+
+        For large files (>64KB), downloads only the first 64KB and computes MD5.
+        For small files (<=64KB), returns size only (no hash needed).
+
+        Returns:
+            {
+                "size": int,           # Total file size
+                "hash": str | None,    # MD5 of first 64KB (None for small files)
+                "needs_hash": bool     # Whether hash matching should be used
+            }
+        """
+        client = self._get_client(client_id)
+        input_channel = InputChannel(channel_id, access_hash)
+
+        # Get the message
+        msgs = await client.get_messages(input_channel, ids=[message_id])
+        if not msgs or not msgs[0]:
+            return {"error": "Message not found"}
+
+        msg = msgs[0]
+        if not msg.media:
+            return {"error": "No media in message"}
+
+        # Get file size
+        file_size = get_media_file_size(msg)
+        if file_size is None:
+            return {"error": "Cannot determine file size"}
+
+        # Small files don't need hash matching
+        if file_size <= HASH_SIZE_THRESHOLD:
+            return {
+                "size": file_size,
+                "hash": None,
+                "needs_hash": False
+            }
+
+        # Download first 64KB and compute hash
+        try:
+            chunks = []
+            bytes_read = 0
+
+            async for chunk in client.iter_download(msg.media, limit=HASH_CHUNK_SIZE):
+                chunks.append(chunk)
+                bytes_read += len(chunk)
+                if bytes_read >= HASH_CHUNK_SIZE:
+                    break
+
+            data = b''.join(chunks)[:HASH_CHUNK_SIZE]
+            file_hash = hashlib.md5(data).hexdigest()
+
+            return {
+                "size": file_size,
+                "hash": file_hash,
+                "needs_hash": True
+            }
+        except Exception as e:
+            logger.error(f"Failed to get media hash: {e}")
+            return {"error": str(e)}
 
     async def _rpc_send_read_acknowledge(self, channel_id: int, access_hash: int,
                                          max_id: int, client_id: int = None) -> dict:

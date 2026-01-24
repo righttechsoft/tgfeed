@@ -224,8 +224,7 @@ class TGClient:
 
     async def download_media(self, channel_id: int, access_hash: int,
                             message_id: int, dest_dir: str,
-                            client_id: int = None,
-                            backup_path: str = None) -> dict:
+                            client_id: int = None) -> dict:
         """Download media from a message.
 
         Args:
@@ -234,11 +233,9 @@ class TGClient:
             message_id: Message ID containing media
             dest_dir: Destination directory for the file
             client_id: Specific client ID to use (optional)
-            backup_path: Optional path to check for existing media before downloading
 
         Returns:
             {"path": str} with relative path, or {"path": None, "error": str}
-            May include "from_backup": True if file was found in backup_path
         """
         params = {
             "channel_id": channel_id,
@@ -248,10 +245,35 @@ class TGClient:
         }
         if client_id is not None:
             params["client_id"] = client_id
-        if backup_path is not None:
-            params["backup_path"] = backup_path
 
         return await self._call("download_media", **params)
+
+    async def get_media_hash(self, channel_id: int, access_hash: int,
+                            message_id: int, client_id: int = None) -> dict:
+        """Get hash of first 64KB of media for backup matching.
+
+        For files >64KB, downloads first 64KB and returns MD5 hash.
+        For files <=64KB, returns size only.
+
+        Args:
+            channel_id: Channel ID
+            access_hash: Channel access hash
+            message_id: Message ID containing media
+            client_id: Specific client ID to use (optional)
+
+        Returns:
+            {"size": int, "hash": str | None, "needs_hash": bool}
+            or {"error": str}
+        """
+        params = {
+            "channel_id": channel_id,
+            "access_hash": access_hash,
+            "message_id": message_id,
+        }
+        if client_id is not None:
+            params["client_id"] = client_id
+
+        return await self._call("get_media_hash", **params)
 
     # Read status
 

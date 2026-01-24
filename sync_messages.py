@@ -14,7 +14,11 @@ from config import MEDIA_DIR
 from database import Database, DatabaseMigration
 from tg_client import TGClient, TGClientConnectionError, TGFloodWaitError, is_daemon_running
 
-# Configure logging
+# Configure logging with UTF-8 support for Windows
+import io
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -53,8 +57,6 @@ async def sync_messages_via_daemon() -> None:
             channel_id = channel["id"]
             channel_title = channel["title"]
             access_hash = channel["access_hash"]
-            # Use backup_path only if download_all is enabled
-            backup_path = channel.get("backup_path") if channel.get("download_all") else None
 
             logger.info(f"Processing channel: {channel_title} (id={channel_id})")
 
@@ -105,14 +107,11 @@ async def sync_messages_via_daemon() -> None:
                                 return (msg["id"], None)
                             # Pass MEDIA_DIR - daemon adds channel_id subfolder
                             result = await client.download_media(
-                                channel_id, access_hash, msg["id"], str(MEDIA_DIR),
-                                backup_path=backup_path
+                                channel_id, access_hash, msg["id"], str(MEDIA_DIR)
                             )
                             path = result.get("path")
-                            from_backup = result.get("from_backup", False)
                             if path:
-                                source = " (from backup)" if from_backup else ""
-                                logger.info(f"    Downloaded media{source}: {path}")
+                                logger.info(f"    Downloaded media: {path}")
                             return (msg["id"], path)
 
                     tasks = [download_with_semaphore(msg) for msg in raw_messages]
@@ -197,17 +196,14 @@ async def sync_messages_via_daemon() -> None:
                 for pending in pending_messages:
                     # Pass MEDIA_DIR - daemon adds channel_id subfolder
                     result = await client.download_media(
-                        channel_id, access_hash, pending["id"], str(MEDIA_DIR),
-                        backup_path=backup_path
+                        channel_id, access_hash, pending["id"], str(MEDIA_DIR)
                     )
                     media_path = result.get("path")
-                    from_backup = result.get("from_backup", False)
 
                     with Database() as db:
                         if media_path:
                             db.update_message_media(channel_id, pending["id"], media_path, media_pending=0)
-                            source = " (from backup)" if from_backup else ""
-                            logger.info(f"    Message {pending['id']}: Downloaded media{source}: {media_path}")
+                            logger.info(f"    Message {pending['id']}: Downloaded media: {media_path}")
                         else:
                             logger.warning(f"    Message {pending['id']}: Media download still pending")
                         db.commit()
@@ -413,8 +409,6 @@ async def sync_messages_direct() -> None:
             channel_id = channel["id"]
             channel_title = channel["title"]
             access_hash = channel["access_hash"]
-            # Use backup_path only if download_all is enabled
-            backup_path = channel.get("backup_path") if channel.get("download_all") else None
 
             logger.info(f"Processing channel: {channel_title} (id={channel_id})")
 
