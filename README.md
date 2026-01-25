@@ -192,11 +192,11 @@ Press **Ctrl+D** to toggle debug mode, which displays:
 
 | Script | Purpose |
 |--------|---------|
+| `orchestrator.sh/.bat` | **Recommended** - TUI that auto-starts everything |
 | `daemon.sh/.bat` | Run Telegram daemon (must be running for sync) |
-| `sync.sh/.bat` | Main sync loop - downloads new messages |
-| `sync_service.sh/.bat` | Background tasks - cleanup, thumbnails, hashes |
 | `web.sh/.bat` | Start web server |
-| `orchestrator.py` | TUI for managing all scripts (start/stop/logs/chains) |
+| `sync.sh/.bat` | Main sync loop - downloads new messages |
+| `sync_service.sh/.bat` | Background tasks - cleanup, thumbnails, hashes, search |
 | `sync_channels.py` | Download channel list (run manually if needed) |
 | `sync_messages.py` | Download messages (run manually if needed) |
 | `sync_history.py` | Download historical messages for archived channels |
@@ -204,10 +204,22 @@ Press **Ctrl+D** to toggle debug mode, which displays:
 | `index_search.py` | Index messages for full-text search |
 | `cleanup.py` | Remove old messages from non-archived channels |
 
-### Orchestrator
+### Orchestrator (Recommended)
 
-Run `uv run python orchestrator.py` for a terminal UI that manages all scripts:
+The easiest way to run TGFeed is with the orchestrator, which **automatically starts everything on launch**: both daemons, both chains, and the history script.
 
+**Windows:**
+```batch
+orchestrator.bat
+```
+
+**Linux/macOS:**
+```bash
+chmod +x orchestrator.sh
+./orchestrator.sh
+```
+
+**Controls:**
 - **Navigate**: `↑/↓` or `j/k` to select scripts (logs auto-update)
 - **Control**: `Enter`/`s` to start, `x` to stop, `a` to start all daemons
 - **Chains**: `F1` for sync chain, `F2` for maintenance chain (sequential loops)

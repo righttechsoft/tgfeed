@@ -37,7 +37,8 @@ tgfeed/
 ├── sync.bat / sync.sh     # Loop: sync_read_to_tg + sync_channels + sync_messages + download_telegraph
 ├── sync_service.bat / sync_service.sh  # Runs maintenance tasks (cleanup, thumbnails, content hashes)
 ├── web.bat / web.sh       # Starts web server
-└── daemon.bat / daemon.sh # Starts Telegram daemon
+├── daemon.bat / daemon.sh # Starts Telegram daemon
+└── orchestrator.bat / orchestrator.sh  # Starts orchestrator TUI (auto-starts everything)
 ```
 
 ## Database Schema
@@ -384,6 +385,10 @@ PHONE_NUMBER=+1234567890
 TG_DAEMON_HOST=127.0.0.1
 TG_DAEMON_PORT=9876
 
+# Web UI (optional, defaults shown)
+WEB_HOST=0.0.0.0
+WEB_PORT=8910
+
 # Mistral API for content deduplication (optional)
 MISTRAL_API_KEY=your_mistral_api_key
 MISTRAL_MODEL=mistral-small-latest
@@ -431,9 +436,10 @@ web.bat
 
 **Orchestrator (TUI for managing all scripts):**
 ```bash
-uv run python orchestrator.py
+orchestrator.bat   # Windows
+./orchestrator.sh  # Linux/macOS
 ```
-The orchestrator provides a terminal UI to start/stop scripts, view their status and logs. Scripts can be run in any order manually. When a script fails (non-zero exit code), full logs are saved to `data/logs/{script}_{timestamp}.log`.
+The orchestrator provides a terminal UI to start/stop scripts, view their status and logs. **On launch, it automatically starts everything:** both daemons (Telegram + Web), both chains (sync + maintenance), and the history script. When a script fails (non-zero exit code), full logs are saved to `data/logs/{script}_{timestamp}.log`.
 
 **Orchestrator controls:**
 - `↑/↓` or `j/k` - Navigate scripts (auto-shows logs for selected script)

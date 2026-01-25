@@ -255,6 +255,8 @@ class Orchestrator:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 bufsize=1,
                 cwd=str(self.base_path),
             )
@@ -524,9 +526,9 @@ class Orchestrator:
     def render_logs(self) -> Panel:
         """Render the log panel."""
         # Calculate available lines based on terminal height
-        # Log panel gets ~60% of height (ratio 3:2), minus borders/padding
+        # Log panel gets 50% of height (ratio 1:1), minus borders/padding
         terminal_height = self.console.height or 40
-        log_panel_height = int(terminal_height * 0.6) - 4  # Account for borders, title, padding
+        log_panel_height = int(terminal_height * 0.5) - 4  # Account for borders, title, padding
         max_lines = max(5, log_panel_height)
 
         if self.show_logs_for:
@@ -540,6 +542,10 @@ class Orchestrator:
                 if script.exit_code and script.exit_code != 0 and script.last_error_log:
                     lines.append("")
                     lines.append(f"[yellow]Full log saved to: {script.last_error_log}[/yellow]")
+
+                # Pad to fixed height to prevent jumping
+                while len(lines) < max_lines:
+                    lines.insert(0, "")
 
                 # Determine border style
                 if script.is_running:
@@ -669,6 +675,26 @@ class Orchestrator:
             if script.is_running:
                 self.stop_script(script.name)
 
+    def start_all(self):
+        """Start all daemons, chains, and the history script."""
+        # Start both daemons first
+        for script in self.get_script_list():
+            if script.script_type == ScriptType.DAEMON and not script.is_running:
+                self.start_script(script.name)
+
+        # Give daemons time to start
+        time.sleep(1)
+
+        # Start both chains
+        for chain in self.get_chain_list():
+            if not chain.active:
+                self.start_chain(chain.name)
+
+        # Start history script
+        history_script = self.scripts.get("history")
+        if history_script and not history_script.is_running:
+            self.start_script("history")
+
     def _get_key_windows(self) -> str | None:
         """Get keyboard input on Windows."""
         if msvcrt.kbhit():
@@ -754,6 +780,9 @@ class Orchestrator:
 
     def _run_windows(self):
         """Run on Windows using msvcrt."""
+        # Auto-start everything on launch
+        self.start_all()
+
         try:
             with Live(self.render(), console=self.console, refresh_per_second=4, screen=True) as live:
                 while self.running:
@@ -774,6 +803,9 @@ class Orchestrator:
 
     def _run_unix(self):
         """Run on Unix using termios."""
+        # Auto-start everything on launch
+        self.start_all()
+
         # Save terminal settings
         old_settings = termios.tcgetattr(sys.stdin)
 
