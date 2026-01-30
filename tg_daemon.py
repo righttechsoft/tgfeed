@@ -298,7 +298,7 @@ class TelegramDaemon:
                             writer: asyncio.StreamWriter) -> None:
         """Handle a single RPC client connection."""
         addr = writer.get_extra_info('peername')
-        logger.debug(f"New RPC connection from {addr}")
+        logger.info(f"New RPC connection from {addr}")
 
         try:
             while self.running:
@@ -334,12 +334,15 @@ class TelegramDaemon:
         params = request.get("params", {})
         req_id = request.get("id")
 
+        logger.info(f"RPC request: {method} (id={req_id})")
+
         handler = getattr(self, f"_rpc_{method}", None)
         if handler is None:
             return {"id": req_id, "error": f"Unknown method: {method}"}
 
         try:
             result = await handler(**params)
+            logger.info(f"RPC response: {method} completed (id={req_id})")
             return {"id": req_id, "result": result}
         except FloodWaitError as e:
             # Return special flood_wait response so client can decide what to do
@@ -462,16 +465,20 @@ class TelegramDaemon:
         Note: Backup handling is done in sync_history.py, not here.
         The daemon only handles direct Telegram downloads.
         """
+        logger.info(f"download_media: channel={channel_id}, msg={message_id}, dest={dest_dir}")
         client = self._get_client(client_id)
         input_channel = InputChannel(channel_id, access_hash)
 
         # Get the message first
+        logger.info(f"download_media: getting message...")
         msgs = await client.get_messages(input_channel, ids=[message_id])
         if not msgs or not msgs[0]:
+            logger.warning(f"download_media: message not found")
             return {"path": None, "error": "Message not found"}
 
         msg = msgs[0]
         if not msg.media:
+            logger.warning(f"download_media: no media in message")
             return {"path": None, "error": "No media in message"}
 
         # Create destination directory
@@ -479,13 +486,23 @@ class TelegramDaemon:
         channel_dest = dest_path / str(channel_id)
         channel_dest.mkdir(parents=True, exist_ok=True)
 
-        # Download from Telegram
+        # Download from Telegram with progress logging
+        def progress_callback(received, total):
+            if total:
+                pct = received * 100 // total
+                logger.info(f"download_media: progress {received}/{total} ({pct}%)")
+            else:
+                logger.info(f"download_media: received {received} bytes")
+
         try:
-            path = await client.download_media(msg, file=channel_dest)
+            logger.info(f"download_media: starting download to {channel_dest}")
+            path = await client.download_media(msg, file=channel_dest, progress_callback=progress_callback)
             if path:
                 downloaded_path = Path(path)
                 rel_path = f"{channel_id}/{downloaded_path.name}"
+                logger.info(f"download_media: success, path={rel_path}")
                 return {"path": rel_path}
+            logger.warning(f"download_media: download returned None")
             return {"path": None, "error": "Download returned None"}
         except Exception as e:
             logger.error(f"Failed to download media: {e}")

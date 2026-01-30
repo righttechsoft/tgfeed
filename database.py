@@ -27,6 +27,11 @@ class DatabaseMigration:
             self._add_column(cursor, "channels", "last_active", "INTEGER")
             self._add_column(cursor, "channels", "download_all", "INTEGER DEFAULT 0")
             self._add_column(cursor, "channels", "backup_path", "TEXT")
+            # Media download flags (for non-download_all channels), default ON
+            self._add_column(cursor, "channels", "download_images", "INTEGER DEFAULT 1")
+            self._add_column(cursor, "channels", "download_videos", "INTEGER DEFAULT 1")
+            self._add_column(cursor, "channels", "download_audio", "INTEGER DEFAULT 1")
+            self._add_column(cursor, "channels", "download_other", "INTEGER DEFAULT 1")
             self._migrate_channel_tables(cursor)
             conn.commit()
             logger.info("Database migrations completed")
@@ -539,6 +544,44 @@ class Database:
             (backup_path, channel_id)
         )
 
+    def update_channel_media_settings(self, channel_id: int, images: int, videos: int,
+                                       audio: int, other: int) -> None:
+        """Update channel media download settings."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE channels SET
+                download_images = ?, download_videos = ?,
+                download_audio = ?, download_other = ?
+            WHERE id = ?
+        """, (images, videos, audio, other, channel_id))
+
+    def get_channel_media_settings(self, channel_id: int) -> dict:
+        """Get channel media download settings."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT download_images, download_videos, download_audio, download_other,
+                   download_all
+            FROM channels WHERE id = ?
+        """, (channel_id,))
+        row = cursor.fetchone()
+        if row:
+            return {
+                "download_images": row[0] if row[0] is not None else 1,
+                "download_videos": row[1] if row[1] is not None else 1,
+                "download_audio": row[2] if row[2] is not None else 1,
+                "download_other": row[3] if row[3] is not None else 1,
+                "download_all": row[4] or 0,
+            }
+        return {"download_images": 1, "download_videos": 1, "download_audio": 1,
+                "download_other": 1, "download_all": 0}
+
+    def get_channel_by_id(self, channel_id: int) -> dict | None:
+        """Get a channel by ID."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM channels WHERE id = ?", (channel_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
     def get_channel_backup_path(self, channel_id: int) -> str | None:
         """Get the backup_path for a channel."""
         cursor = self.conn.cursor()
@@ -549,7 +592,7 @@ class Database:
     def get_download_all_channels(self) -> list[sqlite3.Row]:
         """Get all channels with download_all enabled."""
         cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM channels WHERE subscribed = 1 AND download_all = 1")
+        cursor.execute("SELECT * FROM channels WHERE active=1 AND subscribed = 1 AND download_all = 1")
         return cursor.fetchall()
 
     def get_channels_by_group(self, group_id: int) -> list[sqlite3.Row]:
@@ -579,12 +622,12 @@ class Database:
             table_name = f"channel_{ch_id}"
             try:
                 cursor.execute(f"""
-                    SELECT *, ? as channel_id, ? as channel_title
+                    SELECT *, ? as channel_id, ? as channel_title, ? as channel_username
                     FROM {table_name}
                     WHERE read = 0 OR read IS NULL
                     ORDER BY date DESC
                     LIMIT ?
-                """, (ch_id, channel["title"], limit * 3))
+                """, (ch_id, channel["title"], channel["username"], limit * 3))
                 for row in cursor.fetchall():
                     raw_messages.append(dict(row))
             except sqlite3.Error:
@@ -610,18 +653,71 @@ class Database:
             table_name = f"channel_{ch_id}"
             try:
                 cursor.execute(f"""
-                    SELECT *, ? as channel_id, ? as channel_title
+                    SELECT *, ? as channel_id, ? as channel_title, ? as channel_username
                     FROM {table_name}
                     WHERE date < ?
                     ORDER BY date DESC
                     LIMIT ?
-                """, (ch_id, channel["title"], before_date, limit * 3))
+                """, (ch_id, channel["title"], channel["username"], before_date, limit * 3))
                 for row in cursor.fetchall():
                     raw_messages.append(dict(row))
             except sqlite3.Error:
                 pass
 
         return self._group_album_messages(raw_messages, limit)
+
+    def get_oldest_messages(self, channel_id: int, limit: int = 50) -> list[dict]:
+        """Get the oldest messages for a channel, ordered oldest first."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT title, username FROM channels WHERE id = ?", (channel_id,))
+        row = cursor.fetchone()
+        if not row:
+            return []
+        channel_title = row[0]
+        channel_username = row[1]
+
+        table_name = f"channel_{channel_id}"
+        raw_messages = []
+        try:
+            cursor.execute(f"""
+                SELECT *, ? as channel_id, ? as channel_title, ? as channel_username
+                FROM {table_name}
+                ORDER BY date ASC
+                LIMIT ?
+            """, (channel_id, channel_title, channel_username, limit * 3))
+            for row in cursor.fetchall():
+                raw_messages.append(dict(row))
+        except sqlite3.Error:
+            pass
+
+        return self._group_album_messages(raw_messages, limit, reverse=False)
+
+    def get_later_messages(self, channel_id: int, after_date: int, limit: int = 50) -> list[dict]:
+        """Get messages newer than after_date for a channel, ordered oldest first."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT title, username FROM channels WHERE id = ?", (channel_id,))
+        row = cursor.fetchone()
+        if not row:
+            return []
+        channel_title = row[0]
+        channel_username = row[1]
+
+        table_name = f"channel_{channel_id}"
+        raw_messages = []
+        try:
+            cursor.execute(f"""
+                SELECT *, ? as channel_id, ? as channel_title, ? as channel_username
+                FROM {table_name}
+                WHERE date > ?
+                ORDER BY date ASC
+                LIMIT ?
+            """, (channel_id, channel_title, channel_username, after_date, limit * 3))
+            for row in cursor.fetchall():
+                raw_messages.append(dict(row))
+        except sqlite3.Error:
+            pass
+
+        return self._group_album_messages(raw_messages, limit, reverse=False)
 
     def _group_album_messages(self, raw_messages: list[dict], limit: int, reverse: bool = False) -> list[dict]:
         """Group messages by grouped_id into albums.
@@ -657,9 +753,10 @@ class Database:
 
             media_items = []
             for m in group_msgs:
-                if m.get("media_path"):
+                # Include items with media_path OR media_type (for download button)
+                if m.get("media_path") or m.get("media_type"):
                     media_items.append({
-                        "path": m["media_path"],
+                        "path": m.get("media_path"),
                         "type": m.get("media_type"),
                         "message_id": m["id"],
                         "video_thumbnail_path": m.get("video_thumbnail_path")
@@ -671,9 +768,10 @@ class Database:
             combined_messages.append(base)
 
         for msg in ungrouped:
-            if msg.get("media_path"):
+            # Include items with media_path OR media_type (for download button)
+            if msg.get("media_path") or msg.get("media_type"):
                 msg["media_items"] = [{
-                    "path": msg["media_path"],
+                    "path": msg.get("media_path"),
                     "type": msg.get("media_type"),
                     "message_id": msg["id"],
                     "video_thumbnail_path": msg.get("video_thumbnail_path")
@@ -764,21 +862,21 @@ class Database:
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'channel_%'")
         tables = [row[0] for row in cursor.fetchall() if not row[0].startswith("channel_backup_hash_")]
 
-        cursor.execute("SELECT id, title FROM channels")
-        channel_titles = {row[0]: row[1] for row in cursor.fetchall()}
+        cursor.execute("SELECT id, title, username FROM channels")
+        channel_info = {row[0]: {"title": row[1], "username": row[2]} for row in cursor.fetchall()}
 
         raw_messages = []
         for table_name in tables:
             try:
                 channel_id = int(table_name.replace("channel_", ""))
-                channel_title = channel_titles.get(channel_id, "Unknown")
+                info = channel_info.get(channel_id, {"title": "Unknown", "username": None})
                 cursor.execute(f"""
-                    SELECT *, ? as channel_id, ? as channel_title
+                    SELECT *, ? as channel_id, ? as channel_title, ? as channel_username
                     FROM {table_name}
                     WHERE bookmarked = 1
                     ORDER BY date DESC
                     LIMIT ?
-                """, (channel_id, channel_title, limit * 3))
+                """, (channel_id, info["title"], info["username"], limit * 3))
                 for row in cursor.fetchall():
                     raw_messages.append(dict(row))
             except (sqlite3.Error, ValueError):
@@ -1037,9 +1135,9 @@ class Database:
 
         cursor = self.conn.cursor()
 
-        # Get channel titles for results
-        cursor.execute("SELECT id, title FROM channels")
-        channel_titles = {row[0]: row[1] for row in cursor.fetchall()}
+        # Get channel info for results
+        cursor.execute("SELECT id, title, username FROM channels")
+        channel_info = {row[0]: {"title": row[1], "username": row[2]} for row in cursor.fetchall()}
 
         # Get channel IDs to filter by
         allowed_channels = None
@@ -1088,10 +1186,12 @@ class Database:
             results = []
             for row in rows:
                 ch_id = row[0]
+                info = channel_info.get(ch_id, {"title": "Unknown", "username": None})
                 results.append({
                     "channel_id": ch_id,
                     "message_id": row[1],
-                    "channel_title": channel_titles.get(ch_id, "Unknown")
+                    "channel_title": info["title"],
+                    "channel_username": info["username"]
                 })
             logger.info(f"[search_messages] Returning {len(results)} results")
             return results

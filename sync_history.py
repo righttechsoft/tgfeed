@@ -18,9 +18,19 @@ import shutil
 import sys
 from pathlib import Path
 
-from config import MEDIA_DIR
+import time
+from config import MEDIA_DIR, PAUSE_FILE
 from database import Database, DatabaseMigration
 from tg_client import TGClient, TGClientConnectionError, TGFloodWaitError, is_daemon_running
+
+
+def check_pause():
+    """Check if webui requested a pause. If so, wait until released."""
+    if PAUSE_FILE.exists():
+        logging.info("Pause requested by webui, waiting...")
+        while PAUSE_FILE.exists():
+            time.sleep(0.5)
+        logging.info("Pause released, resuming")
 
 # Hash constants
 HASH_SIZE_THRESHOLD = 64 * 1024  # 64KB - files <= this size skip hash matching
@@ -119,9 +129,11 @@ def copy_from_backup(backup_file: str, dest_dir: Path, channel_id: int) -> str |
 
 
 # Configure logging with UTF-8 support for Windows
-import io
+import os
 if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    os.system('')  # Enable ANSI escape sequences
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 logging.basicConfig(
     level=logging.INFO,
@@ -163,6 +175,7 @@ async def sync_history_via_daemon() -> None:
         total_from_backup = 0
 
         for channel in channels:
+            check_pause()  # Allow webui to interrupt
             channel_id = channel["id"]
             channel_title = channel["title"]
             access_hash = channel["access_hash"]
@@ -565,6 +578,7 @@ async def sync_history_direct() -> None:
         total_from_backup = 0
 
         for channel in channels:
+            check_pause()  # Allow webui to interrupt
             channel_id = channel["id"]
             channel_title = channel["title"]
             access_hash = channel["access_hash"]
@@ -698,4 +712,7 @@ async def sync_history() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(sync_history())
+    while True:
+        asyncio.run(sync_history())
+        logger.info("History sync complete, waiting 60s before next run...")
+        time.sleep(60)

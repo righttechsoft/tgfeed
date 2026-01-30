@@ -13,9 +13,11 @@ from database import Database, DatabaseMigration
 from tg_client import TGClient, TGClientConnectionError, TGFloodWaitError, is_daemon_running
 
 # Configure logging with UTF-8 support for Windows
-import io
+import os
 if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    os.system('')  # Enable ANSI escape sequences
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 logging.basicConfig(
     level=logging.INFO,

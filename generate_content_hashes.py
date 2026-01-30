@@ -1,4 +1,4 @@
-"""Generate semantic content hashes for message deduplication using Mistral LLM API.
+"""Generate semantic content hashes for message deduplication using Claude API.
 
 Processes messages to create normalized summaries, then hashes them for
 cross-channel duplicate detection.
@@ -12,10 +12,10 @@ import time
 import requests
 
 from config import (
+    ANTHROPIC_API_KEY,
+    CLAUDE_MODEL,
     DEDUP_MESSAGES_PER_RUN,
     DEDUP_MIN_MESSAGE_LENGTH,
-    MISTRAL_API_KEY,
-    MISTRAL_MODEL,
     validate_config,
 )
 from database import Database, DatabaseMigration
@@ -32,50 +32,50 @@ logger = logging.getLogger(__name__)
 API_DELAY_SECONDS = 1.0  # Delay between API calls
 
 
-# Summarization prompt for Mistral
-SUMMARY_PROMPT = """Summarize the main meaning of this post in 1-2 sentences. Focus on:
+# System prompt for Claude
+SYSTEM_PROMPT = """Create a short headline for this post in a short sentence. Focus on:
 - What is the core topic or news?
 - What are the key facts, names, numbers, or events?
 - Ignore greetings, calls to action, formatting, and promotional language.
 
-Output ONLY the summary, nothing else. Maximum 100 words. Always use English!
+ALWAYS USE STRUCTURE: Who, When, What, How.
 
-Post:
-{message}"""
+Output ONLY the summary, nothing else. Maximum 100 words. Always use English, regardless of the post language!
+
+If the post is clearly an advertising, respond with just a single word `advertising`"""
 
 
-def call_mistral_api(message_text: str) -> str | None:
-    """Call Mistral API to generate a summary of the message.
+def call_claude_api(message_text: str) -> str | None:
+    """Call Claude API to generate a summary of the message.
 
     Returns the summary, or None on error.
     """
-    if not MISTRAL_API_KEY:
-        logger.error("MISTRAL_API_KEY not configured")
+    if not ANTHROPIC_API_KEY:
+        logger.error("ANTHROPIC_API_KEY not configured")
         return None
 
-    url = "https://api.mistral.ai/v1/chat/completions"
+    url = "https://api.anthropic.com/v1/messages"
 
     headers = {
-        "Authorization": f"Bearer {MISTRAL_API_KEY}",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
         "Content-Type": "application/json"
     }
 
-    prompt = SUMMARY_PROMPT.format(message=message_text)
-
     payload = {
-        "model": MISTRAL_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.0,  # Deterministic output for consistent hashes
-        "max_tokens": 150
+        "model": CLAUDE_MODEL,
+        "max_tokens": 150,
+        "system": SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": message_text}],
     }
 
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=30)
         response.raise_for_status()
         result = response.json()
-        return result["choices"][0]["message"]["content"].strip()
+        return result["content"][0]["text"].strip()
     except requests.exceptions.RequestException as e:
-        logger.error(f"Mistral API error: {e}")
+        logger.error(f"Claude API error: {e}")
         return None
     except (KeyError, IndexError) as e:
         logger.error(f"Unexpected API response format: {e}")
@@ -95,8 +95,8 @@ def generate_content_hashes() -> None:
 
     validate_config()
 
-    if not MISTRAL_API_KEY:
-        logger.error("MISTRAL_API_KEY not set in .env - cannot proceed")
+    if not ANTHROPIC_API_KEY:
+        logger.error("ANTHROPIC_API_KEY not set in .env - cannot proceed")
         sys.exit(1)
 
     # Run migrations to ensure columns exist
@@ -150,8 +150,8 @@ def generate_content_hashes() -> None:
             # Rate limit
             time.sleep(API_DELAY_SECONDS)
 
-            # Generate AI summary via Mistral
-            ai_summary = call_mistral_api(message_text)
+            # Generate AI summary via Claude
+            ai_summary = call_claude_api(message_text)
 
             if not ai_summary:
                 logger.warning(f"  Failed to get summary for message {msg['id']}")
@@ -192,4 +192,5 @@ def generate_content_hashes() -> None:
 
 
 if __name__ == "__main__":
-    generate_content_hashes()
+    return
+    #generate_content_hashes()

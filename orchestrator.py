@@ -10,16 +10,31 @@ Usage:
     uv run python orchestrator.py
 """
 
+import logging
 import os
 import subprocess
 import sys
 import threading
 import time
-from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
 from pathlib import Path
+
+# Set up file logging for debugging with immediate flush
+LOG_DIR = Path(__file__).parent / "data" / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+class FlushFileHandler(logging.FileHandler):
+    """File handler that flushes after every write."""
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+handler = FlushFileHandler(str(LOG_DIR / "orchestrator_debug.log"), mode="w", encoding="utf-8")
+handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+logger.addHandler(handler)
 
 try:
     from rich.console import Console
@@ -42,11 +57,8 @@ else:
     import tty
     import termios
 
-# Maximum log lines to keep per script
-MAX_LOG_LINES = 100
-
-# Directory for error logs
-ERROR_LOG_DIR = Path(__file__).parent / "data" / "logs"
+# Maximum log lines to display
+MAX_LOG_LINES = 30
 
 
 class ScriptType(Enum):
@@ -114,9 +126,8 @@ class Script:
     script_type: ScriptType
     depends_on: list[str] = field(default_factory=list)
     process: subprocess.Popen | None = None
-    logs: deque = field(default_factory=lambda: deque(maxlen=MAX_LOG_LINES))
     exit_code: int | None = None
-    last_error_log: str | None = None  # Path to last error log file
+    log_file: Path | None = None  # Path to current log file
 
     @property
     def is_running(self) -> bool:
@@ -248,23 +259,29 @@ class Orchestrator:
             return False
 
         try:
-            script.logs.clear()
+            # Create log directory and file
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            script.log_file = LOG_DIR / f"{name}.log"
+
+            # Open log file (overwrite each run)
+            log_handle = open(script.log_file, "w", encoding="utf-8", buffering=1)
+
             script.exit_code = None
             script.process = subprocess.Popen(
                 [sys.executable, str(script_path)],
-                stdout=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,  # Prevent child from stealing keyboard input
+                stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 text=True,
                 encoding='utf-8',
                 errors='replace',
-                bufsize=1,
                 cwd=str(self.base_path),
             )
 
-            # Start log reader thread
+            # Start exit monitor thread (closes log file when process ends)
             thread = threading.Thread(
-                target=self._read_logs,
-                args=(script,),
+                target=self._monitor_script,
+                args=(script, log_handle),
                 daemon=True
             )
             thread.start()
@@ -299,44 +316,20 @@ class Orchestrator:
             self.set_message(f"Failed to stop {name}: {e}", error=True)
             return False
 
-    def _read_logs(self, script: Script):
-        """Read logs from a running script (runs in thread)."""
+    def _monitor_script(self, script: Script, log_handle):
+        """Monitor script process and close log file when done (runs in thread)."""
         try:
-            while script.process and script.process.poll() is None:
-                line = script.process.stdout.readline()
-                if line:
-                    script.logs.append(line.rstrip())
-            # Read remaining output
-            if script.process:
-                for line in script.process.stdout:
-                    script.logs.append(line.rstrip())
-                script.exit_code = script.process.returncode
-
-                # Save logs to file if script failed
-                if script.exit_code != 0:
-                    self._save_error_log(script)
-        except Exception as e:
-            script.logs.append(f"[Error reading logs: {e}]")
-
-    def _save_error_log(self, script: Script):
-        """Save script logs to a file when it fails."""
-        try:
-            ERROR_LOG_DIR.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_file = ERROR_LOG_DIR / f"{script.name}_{timestamp}.log"
-
-            with open(log_file, "w", encoding="utf-8") as f:
-                f.write(f"Script: {script.name} ({script.path})\n")
-                f.write(f"Exit code: {script.exit_code}\n")
-                f.write(f"Time: {datetime.now().isoformat()}\n")
-                f.write("=" * 50 + "\n\n")
-                for line in script.logs:
-                    f.write(line + "\n")
-
-            script.last_error_log = str(log_file)
-            self.set_message(f"{script.name} failed - log saved to {log_file.name}", error=True)
-        except Exception as e:
-            self.set_message(f"Failed to save error log: {e}", error=True)
+            # Wait for process to finish
+            script.process.wait()
+            script.exit_code = script.process.returncode
+        except Exception:
+            pass
+        finally:
+            # Close the log file handle
+            try:
+                log_handle.close()
+            except Exception:
+                pass
 
     def start_chain(self, name: str) -> bool:
         """Start a chain running in loop mode."""
@@ -523,6 +516,35 @@ class Orchestrator:
 
         return table
 
+    def _read_log_file(self, script: Script, max_lines: int) -> list[str]:
+        """Read the last N lines from a script's log file."""
+        if not script.log_file or not script.log_file.exists():
+            return []
+
+        try:
+            with open(script.log_file, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            if not content:
+                return []
+            # Drop incomplete last line (still being written)
+            if not content.endswith("\n"):
+                last_nl = content.rfind("\n")
+                if last_nl == -1:
+                    return []
+                content = content[:last_nl + 1]
+            all_lines = content.splitlines()
+            lines = []
+            for line in all_lines[-max_lines:]:
+                # Keep ASCII and Cyrillic, replace others (emoji etc cause width issues)
+                clean = "".join(
+                    c if ord(c) < 128 or 0x0400 <= ord(c) <= 0x04FF else "?"
+                    for c in line[:200]
+                )
+                lines.append(clean)
+            return lines
+        except Exception:
+            return []
+
     def render_logs(self) -> Panel:
         """Render the log panel."""
         # Calculate available lines based on terminal height
@@ -534,14 +556,9 @@ class Orchestrator:
         if self.show_logs_for:
             script = self.scripts.get(self.show_logs_for)
             if script:
-                # Get the last N lines that will fit
-                log_lines = list(script.logs) if script.logs else []
-                lines = log_lines[-max_lines:] if log_lines else ["(no logs yet)"]
-
-                # Add error log path if script failed
-                if script.exit_code and script.exit_code != 0 and script.last_error_log:
-                    lines.append("")
-                    lines.append(f"[yellow]Full log saved to: {script.last_error_log}[/yellow]")
+                lines = self._read_log_file(script, max_lines)
+                if not lines:
+                    lines = ["(no logs yet)"]
 
                 # Pad to fixed height to prevent jumping
                 while len(lines) < max_lines:
@@ -555,14 +572,17 @@ class Orchestrator:
                 else:
                     border_style = "dim"
 
+                # Use Text object to avoid any markup/emoji interpretation
+                log_text = Text("\n".join(lines), no_wrap=True, overflow="ellipsis")
+
                 return Panel(
-                    "\n".join(lines),
+                    log_text,
                     title=f"Logs: {script.name}",
                     border_style=border_style,
                 )
 
         return Panel(
-            "[dim]Select a script and press [L] to view logs[/dim]",
+            "[dim]Select a script to view logs[/dim]",
             title="Logs",
             border_style="dim",
         )
@@ -573,7 +593,6 @@ class Orchestrator:
   [cyan]↑/↓[/cyan] [cyan]j/k[/cyan]  Navigate
   [cyan]Enter[/cyan] [cyan]s[/cyan]  Start script
   [cyan]x[/cyan]       Stop script
-  [cyan]l[/cyan]       View logs
   [cyan]a[/cyan]       Start daemons
 
 [bold]Chains:[/bold]
@@ -592,6 +611,7 @@ class Orchestrator:
         """Render the full layout."""
         from rich.console import Group
 
+        logger.debug("render: creating layout")
         layout = Layout()
 
         layout.split_column(
@@ -599,45 +619,56 @@ class Orchestrator:
             Layout(name="bottom", ratio=1),
         )
 
+        logger.debug("render: calling render_script_table")
+        script_table = self.render_script_table()
+        logger.debug("render: calling render_chain_table")
+        chain_table = self.render_chain_table()
+
         # Combine script table and chain table
-        tables_group = Group(
-            self.render_script_table(),
-            self.render_chain_table(),
-        )
+        tables_group = Group(script_table, chain_table)
+
+        logger.debug("render: calling render_help")
+        help_panel = self.render_help()
 
         layout["tables"].split_row(
             Layout(tables_group, name="scripts", ratio=3),
-            Layout(self.render_help(), name="help", ratio=1),
+            Layout(help_panel, name="help", ratio=1),
         )
 
-        layout["bottom"].update(self.render_logs())
+        logger.debug("render: calling render_logs")
+        logs_panel = self.render_logs()
+        layout["bottom"].update(logs_panel)
 
+        logger.debug("render: done")
         return layout
 
     def handle_input(self, key: str):
         """Handle keyboard input."""
+        logger.debug(f"handle_input called with key: {repr(key)}")
         scripts_list = self.get_script_list()
         chains_list = self.get_chain_list()
         num_scripts = len(scripts_list)
 
         if key in ("up", "k"):
+            logger.debug(f"Moving up from index {self.selected_index}")
             self.selected_index = (self.selected_index - 1) % num_scripts
-            self.show_logs_for = scripts_list[self.selected_index].name
+            script = scripts_list[self.selected_index]
+            logger.debug(f"New index {self.selected_index}, showing logs for {script.name}")
+            self.show_logs_for = script.name
+            logger.debug(f"show_logs_for set to {self.show_logs_for}")
         elif key in ("down", "j"):
+            logger.debug(f"Moving down from index {self.selected_index}")
             self.selected_index = (self.selected_index + 1) % num_scripts
-            self.show_logs_for = scripts_list[self.selected_index].name
+            script = scripts_list[self.selected_index]
+            logger.debug(f"New index {self.selected_index}, showing logs for {script.name}")
+            self.show_logs_for = script.name
+            logger.debug(f"show_logs_for set to {self.show_logs_for}")
         elif key in ("enter", "s"):
             script = scripts_list[self.selected_index]
             self.start_script(script.name)
         elif key == "x":
             script = scripts_list[self.selected_index]
             self.stop_script(script.name)
-        elif key == "l":
-            script = scripts_list[self.selected_index]
-            if self.show_logs_for == script.name:
-                self.show_logs_for = None
-            else:
-                self.show_logs_for = script.name
         elif key == "a":
             # Start all daemons
             for script in scripts_list:
@@ -697,10 +728,22 @@ class Orchestrator:
 
     def _get_key_windows(self) -> str | None:
         """Get keyboard input on Windows."""
-        if msvcrt.kbhit():
+        logger.debug("Checking kbhit()")
+        has_key = msvcrt.kbhit()
+        logger.debug(f"kbhit() returned {has_key}")
+        if has_key:
+            logger.debug("Calling getch()")
             key = msvcrt.getch()
+            logger.debug(f"getch() returned: {repr(key)}")
             # Handle special keys (arrow keys and function keys)
             if key in (b'\x00', b'\xe0'):
+                # Wait briefly for second byte of special key sequence
+                # This should be immediate, but add timeout just in case
+                wait_start = time.time()
+                while not msvcrt.kbhit():
+                    if time.time() - wait_start > 0.1:  # 100ms timeout
+                        return None
+                    time.sleep(0.01)
                 key2 = msvcrt.getch()
                 if key2 == b'H':
                     return "up"
@@ -780,18 +823,23 @@ class Orchestrator:
 
     def _run_windows(self):
         """Run on Windows using msvcrt."""
+        logger.info("Starting orchestrator on Windows")
         # Auto-start everything on launch
         self.start_all()
 
         try:
+            logger.debug("Entering main loop")
             with Live(self.render(), console=self.console, refresh_per_second=4, screen=True) as live:
                 while self.running:
                     key = self._get_key_windows()
                     if key:
                         self.handle_input(key)
                     else:
-                        time.sleep(0.05)  # Small delay to prevent busy-waiting
-                    live.update(self.render())
+                        time.sleep(0.05)
+                    try:
+                        live.update(self.render())
+                    except Exception as e:
+                        logger.error(f"Render error: {e}")
 
         except KeyboardInterrupt:
             pass

@@ -498,11 +498,48 @@
             color: #999;
         }
 
+        /* Media download settings */
+        .channel-media-settings {
+            display: flex;
+            gap: 4px;
+            padding: 4px 8px 4px 48px;
+            align-items: center;
+        }
+
+        .media-setting-label {
+            display: flex;
+            align-items: center;
+            gap: 2px;
+            cursor: pointer;
+            padding: 2px 4px;
+            border-radius: 4px;
+            font-size: 11px;
+            background: #f0f0f0;
+            transition: background 0.2s;
+        }
+
+        .media-setting-label:hover {
+            background: #e0e0e0;
+        }
+
+        .media-setting-label:has(input:checked) {
+            background: #d4edda;
+        }
+
+        .media-setting {
+            width: 12px;
+            height: 12px;
+            margin: 0;
+        }
+
+        .media-icon {
+            font-size: 12px;
+            line-height: 1;
+        }
+
         /* Main content */
         .main-content {
             padding: 72px 16px 16px;
-            max-width: 800px;
-            margin: 0 auto;
         }
 
         .placeholder {
@@ -516,6 +553,8 @@
             display: flex;
             flex-direction: column;
             gap: 16px;
+            max-width: 1200px;
+            margin: 0 auto;
         }
 
         .message-card {
@@ -560,6 +599,12 @@
         .message-date {
             font-size: 12px;
             color: #888;
+            text-decoration: none;
+        }
+
+        .message-date:hover {
+            color: #2196F3;
+            text-decoration: underline;
         }
 
         .message-body {
@@ -589,6 +634,53 @@
             max-width: 100%;
             border-radius: 4px;
             cursor: pointer;
+        }
+
+        /* Media placeholder for not-yet-downloaded media */
+        .media-placeholder {
+            width: 100%;
+            min-height: 120px;
+            background: linear-gradient(135deg, #2a2a2a 0%, #3a3a3a 100%);
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .media-placeholder .download-btn {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 20px;
+            background: #444;
+            border: 1px solid #555;
+            border-radius: 6px;
+            color: #ccc;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.2s, border-color 0.2s;
+        }
+
+        .media-placeholder .download-btn:hover {
+            background: #555;
+            border-color: #666;
+        }
+
+        .media-placeholder .download-btn.downloading {
+            pointer-events: none;
+            opacity: 0.7;
+        }
+
+        .media-placeholder .download-btn .icon {
+            font-size: 18px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .media-placeholder .download-btn.downloading .icon {
+            animation: spin 1s linear infinite;
         }
 
         /* Image lightbox */
@@ -902,7 +994,8 @@
         }
 
         /* Loading indicator for earlier messages */
-        .loading-earlier {
+        .loading-earlier,
+        .loading-later {
             text-align: center;
             padding: 16px;
             color: #888;
@@ -1211,6 +1304,22 @@
             background: #e3f2fd;
         }
 
+        /* Jump to oldest button in header */
+        .jump-oldest-btn {
+            background: rgba(255,255,255,0.2);
+            border: none;
+            color: white;
+            font-size: 16px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            cursor: pointer;
+            margin-left: 8px;
+        }
+
+        .jump-oldest-btn:hover {
+            background: rgba(255,255,255,0.3);
+        }
+
         /* Clear filter button in header */
         .clear-filter-btn {
             background: rgba(255,255,255,0.2);
@@ -1430,6 +1539,10 @@
 
         /* Mobile responsive styles */
         @media (max-width: 768px) {
+            .feed {
+                width: 100%;
+            }
+
             .message-row {
                 position: relative;
             }
@@ -1712,8 +1825,12 @@
         let messages = [];
         let readMessages = new Set();
         let earliestDate = null;
+        let latestDate = null;
         let loadingEarlier = false;
+        let loadingLater = false;
         let noMoreEarlierMessages = false;
+        let noMoreLaterMessages = false;
+        let viewingFromOldest = false;
 
         // Search elements
         const searchBtn = document.getElementById('searchBtn');
@@ -1825,6 +1942,72 @@
             imageLightbox.classList.remove('open');
             lightboxImage.src = '';
             document.body.style.overflow = '';
+        }
+
+        // Download media from Telegram immediately
+        async function downloadMedia(btn, channelId, messageId) {
+            console.log('downloadMedia called:', channelId, messageId);
+            btn.classList.add('downloading');
+            btn.querySelector('.icon').textContent = '⏳';
+            btn.querySelector('.label').textContent = 'Downloading...';
+
+            try {
+                const res = await fetch(`/api/download-media/${channelId}/${messageId}`, {
+                    method: 'POST'
+                });
+                const data = await res.json();
+
+                if (data.error) {
+                    btn.classList.remove('downloading');
+                    btn.querySelector('.icon').textContent = '🔄';
+                    btn.querySelector('.label').textContent = 'Retry';
+                    btn.title = data.error;
+                    return;
+                }
+
+                if (data.path) {
+                    // Already downloaded - show media
+                    const placeholder = btn.closest('.media-placeholder');
+                    const mediaContainer = placeholder.closest('.message-media');
+                    const mediaUrl = `/media/${data.path}`;
+
+                    const ext = data.path.split('.').pop().toLowerCase();
+                    const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'];
+                    const videoExts = ['mp4', 'webm', 'mov', 'avi', 'mkv'];
+                    const audioExts = ['mp3', 'ogg', 'wav', 'flac', 'm4a', 'aac'];
+
+                    let newContent;
+                    if (imageExts.includes(ext)) {
+                        newContent = `<img src="${mediaUrl}" alt="" loading="lazy">`;
+                    } else if (videoExts.includes(ext)) {
+                        newContent = `<video src="${mediaUrl}" controls preload="metadata"></video>`;
+                    } else if (audioExts.includes(ext)) {
+                        const fileName = data.path.split(/[/\\]/).pop();
+                        newContent = `<div class="audio-player">
+                            <div class="audio-filename">${fileName}</div>
+                            <audio src="${mediaUrl}" controls preload="none" style="width:100%"></audio>
+                        </div>`;
+                    } else {
+                        const fileName = data.path.split(/[/\\]/).pop();
+                        newContent = `<a href="${mediaUrl}" target="_blank" class="file-attachment">
+                            <span class="file-icon">📄</span>
+                            <span class="file-name">${fileName}</span>
+                        </a>`;
+                    }
+
+                    mediaContainer.innerHTML = newContent;
+                } else {
+                    btn.classList.remove('downloading');
+                    btn.querySelector('.icon').textContent = '🔄';
+                    btn.querySelector('.label').textContent = 'Retry';
+                }
+            } catch (e) {
+                btn.classList.remove('downloading');
+                btn.querySelector('.icon').textContent = '🔄';
+                btn.querySelector('.label').textContent = 'Retry';
+                btn.title = 'Network error';
+                console.error('Download error:', e);
+            }
         }
 
         lightboxClose.addEventListener('click', (e) => {
@@ -2109,11 +2292,12 @@
                 </button>`;
             });
 
-            // Show clear filter button if a channel is selected (not during search)
+            // Show clear filter button and jump to oldest button if a channel is selected (not during search)
             if (currentChannelId && !showingSearch) {
                 const channel = channels.find(c => c.id === currentChannelId);
                 const channelName = channel ? channel.title : 'Channel';
                 html += `<button class="clear-filter-btn" id="clearFilterBtn">&times; ${escapeHtml(channelName)}</button>`;
+                html += `<button class="jump-oldest-btn" id="jumpOldestBtn" title="Jump to oldest message">&#8593;</button>`;
             }
 
             groupTabs.innerHTML = html;
@@ -2130,6 +2314,12 @@
             const clearBtn = document.getElementById('clearFilterBtn');
             if (clearBtn) {
                 clearBtn.addEventListener('click', clearChannelFilter);
+            }
+
+            // Jump to oldest button handler
+            const jumpOldestBtn = document.getElementById('jumpOldestBtn');
+            if (jumpOldestBtn) {
+                jumpOldestBtn.addEventListener('click', jumpToOldestMessage);
             }
         }
 
@@ -2409,11 +2599,35 @@
             }
         }
 
+        // Jump to oldest message in filtered channel
+        async function jumpToOldestMessage() {
+            if (!currentChannelId) return;
+
+            mainContent.innerHTML = '<div class="placeholder"><p>Loading oldest messages...</p></div>';
+
+            try {
+                const res = await fetch(`/api/channel/${currentChannelId}/oldest?limit=50`);
+                messages = await res.json();
+                updateEarliestDate();
+                noMoreEarlierMessages = true;  // We're at the beginning
+                noMoreLaterMessages = false;   // Can load newer messages
+                viewingFromOldest = true;      // Enable scroll-down loading
+                renderFeed();
+                // Scroll to top to see oldest message
+                mainContent.scrollTop = 0;
+            } catch (e) {
+                mainContent.innerHTML = '<div class="placeholder"><p>Error loading messages</p></div>';
+            }
+        }
+
         // Load messages for a group
         async function loadGroupMessages(groupId) {
             mainContent.innerHTML = '<div class="placeholder"><p>Loading messages...</p></div>';
             earliestDate = null;
+            latestDate = null;
             noMoreEarlierMessages = false;
+            noMoreLaterMessages = false;
+            viewingFromOldest = false;
 
             try {
                 let url = `/api/group/${groupId}/messages?limit=100`;
@@ -2429,10 +2643,11 @@
             }
         }
 
-        // Update earliest date from current messages
+        // Update earliest and latest date from current messages
         function updateEarliestDate() {
             if (messages.length > 0) {
                 earliestDate = Math.min(...messages.map(m => m.date || Infinity));
+                latestDate = Math.max(...messages.map(m => m.date || 0));
             }
         }
 
@@ -2484,6 +2699,65 @@
             } finally {
                 loadingEarlier = false;
             }
+        }
+
+        // Load later (newer) messages when viewing from oldest
+        async function loadLaterMessages() {
+            if (!currentChannelId || !latestDate || loadingLater || noMoreLaterMessages || !viewingFromOldest) return;
+
+            loadingLater = true;
+
+            // Show loading indicator at bottom
+            const feed = document.querySelector('.feed');
+            const loadingEl = document.createElement('div');
+            loadingEl.className = 'loading-later';
+            loadingEl.textContent = 'Loading...';
+            if (feed) {
+                feed.appendChild(loadingEl);
+            }
+
+            try {
+                const res = await fetch(`/api/channel/${currentChannelId}/later?after=${latestDate}&limit=50`);
+                const laterMessages = await res.json();
+
+                // Remove loading indicator
+                loadingEl.remove();
+
+                if (laterMessages.length > 0) {
+                    // Dedupe: filter out any messages already in the list
+                    const existingIds = new Set(messages.map(m => `${m.channel_id}-${m.id}`));
+                    const newMessages = laterMessages.filter(m => !existingIds.has(`${m.channel_id}-${m.id}`));
+
+                    if (newMessages.length > 0) {
+                        // Append later messages (they are newer, so go at the bottom)
+                        messages = [...messages, ...newMessages];
+                        updateEarliestDate();
+                        renderFeedAppend(newMessages);
+                    } else {
+                        noMoreLaterMessages = true;
+                    }
+                } else {
+                    noMoreLaterMessages = true;
+                }
+            } catch (e) {
+                console.error('Failed to load later messages:', e);
+                loadingEl.remove();
+            } finally {
+                loadingLater = false;
+            }
+        }
+
+        // Append new messages to the feed (for loading later messages)
+        function renderFeedAppend(newMessages) {
+            const feed = document.querySelector('.feed');
+            if (!feed) return;
+
+            for (const msg of newMessages) {
+                feed.innerHTML += renderMessage(msg);
+            }
+
+            // Initialize new elements
+            initializeMessageElements();
         }
 
         // Load earlier messages manually (when clicking the button on empty feed)
@@ -2574,6 +2848,11 @@
                 // Load earlier messages only when scrolled to the very top (position 0)
                 if (window.scrollY === 0 && !loadingEarlier && !noMoreEarlierMessages && currentGroupId && !showingBookmarks) {
                     loadEarlierMessages();
+                }
+
+                // Load later messages when viewing from oldest and scrolled to bottom
+                if (viewingFromOldest && isAtBottom() && !loadingLater && !noMoreLaterMessages && currentChannelId) {
+                    loadLaterMessages();
                 }
 
                 // Mark visible messages as read when scrolled to the bottom (no more messages below)
@@ -2829,7 +3108,7 @@
                         html += `<div class="message-reply-text">${escapeHtml(msg.message)}</div>`;
                     }
 
-                    if (msg.media_path && msg.media_type) {
+                    if (msg.media_type && msg.media_path) {
                         const mediaUrl = `/media/${msg.media_path}`;
                         const effectiveType = getEffectiveMediaTypeFromPath(msg.media_type, msg.media_path);
 
@@ -2837,7 +3116,6 @@
                         if (effectiveType === 'photo') {
                             html += `<img src="${mediaUrl}" alt="" loading="lazy">`;
                         } else if (effectiveType === 'video') {
-                            // Check for thumbnail
                             if (msg.video_thumbnail_path) {
                                 html += `<div class="video-thumbnail-container" data-video-src="${mediaUrl}">
                                     <img src="/media/${msg.video_thumbnail_path}" alt="" loading="lazy" class="video-thumbnail">
@@ -2853,6 +3131,16 @@
                             html += `<a href="${mediaUrl}" target="_blank">📄 ${escapeHtml(filename)}</a>`;
                         }
                         html += '</div>';
+                    } else if (msg.media_type && !msg.media_path) {
+                        // Media not downloaded - show download button
+                        html += `<div class="message-reply-media">
+                            <div class="media-placeholder" data-channel="${channelId}" data-message="${replyToId}">
+                                <button class="download-btn" onclick="downloadMedia(this, ${channelId}, ${replyToId})">
+                                    <span class="icon">📥</span>
+                                    <span class="label">Download</span>
+                                </button>
+                            </div>
+                        </div>`;
                     }
 
                     if (!html) {
@@ -2876,6 +3164,17 @@
             const photoUrl = `/api/channel/${msg.channel_id}/photo`;
             const initial = msg.channel_title ? msg.channel_title[0].toUpperCase() : '?';
 
+            // Build Telegram link for the message
+            let telegramLink = '';
+            if (msg.channel_username) {
+                // Public channel with username
+                telegramLink = `https://t.me/${msg.channel_username}/${msg.id}`;
+            } else {
+                // Private channel - use channel ID without -100 prefix
+                const shortChannelId = String(msg.channel_id).replace(/^-100/, '');
+                telegramLink = `https://t.me/c/${shortChannelId}/${msg.id}`;
+            }
+
             let textHtml = escapeHtml(msg.message || '');
             // Apply entities (links, formatting)
             if (msg.entities) {
@@ -2889,40 +3188,43 @@
 
             // Render media (album or single)
             let mediaHtml = '';
-            const mediaItems = msg.media_items || [];
+            let mediaItems = msg.media_items || [];
+
+            // If no media_items but we have media_type, create a virtual item for live view
+            if (mediaItems.length === 0 && msg.media_type && !msg.media_path) {
+                mediaItems = [{
+                    type: msg.media_type,
+                    path: null,
+                    message_id: msg.id
+                }];
+            }
 
             if (mediaItems.length === 1) {
                 // Single media item
                 const item = mediaItems[0];
-                const mediaUrl = `/media/${item.path}`;
                 const effectiveType = getEffectiveMediaType(item);
                 if (effectiveType === 'photo') {
-                    mediaHtml = `<div class="message-media"><img src="${mediaUrl}" alt="" loading="lazy"></div>`;
+                    mediaHtml = renderImage(item, msg.channel_id, msg.id);
                 } else if (effectiveType === 'video') {
-                    mediaHtml = renderVideo(item);
-                } else if (effectiveType === 'audio') {
-                    mediaHtml = renderAudioPlayer(item);
-                } else if (effectiveType === 'voice') {
-                    mediaHtml = `<div class="message-media"><audio src="${mediaUrl}" controls preload="none" style="width:100%"></audio></div>`;
-                } else if (item.path) {
+                    mediaHtml = renderVideo(item, msg.channel_id, msg.id);
+                } else if (effectiveType === 'audio' || effectiveType === 'voice') {
+                    mediaHtml = renderAudioPlayer(item, msg.channel_id, msg.id);
+                } else if (item.path || item.type) {
                     // Other file types - show as file attachment
-                    mediaHtml = renderFileAttachment(item);
+                    mediaHtml = renderFileAttachment(item, msg.channel_id, msg.id);
                 }
             } else if (mediaItems.length > 1) {
                 // Album with multiple items - show in a single column
                 mediaItems.forEach(item => {
-                    const mediaUrl = `/media/${item.path}`;
                     const effectiveType = getEffectiveMediaType(item);
                     if (effectiveType === 'photo') {
-                        mediaHtml += `<div class="message-media"><img src="${mediaUrl}" alt="" loading="lazy"></div>`;
+                        mediaHtml += renderImage(item, msg.channel_id, item.message_id || msg.id);
                     } else if (effectiveType === 'video') {
-                        mediaHtml += renderVideo(item);
-                    } else if (effectiveType === 'audio') {
-                        mediaHtml += renderAudioPlayer(item);
-                    } else if (effectiveType === 'voice') {
-                        mediaHtml += `<div class="message-media"><audio src="${mediaUrl}" controls preload="none" style="width:100%"></audio></div>`;
-                    } else if (item.path) {
-                        mediaHtml += renderFileAttachment(item);
+                        mediaHtml += renderVideo(item, msg.channel_id, item.message_id || msg.id);
+                    } else if (effectiveType === 'audio' || effectiveType === 'voice') {
+                        mediaHtml += renderAudioPlayer(item, msg.channel_id, item.message_id || msg.id);
+                    } else if (item.path || item.type) {
+                        mediaHtml += renderFileAttachment(item, msg.channel_id, item.message_id || msg.id);
                     }
                 });
             }
@@ -3042,7 +3344,7 @@
                             </div>
                             <div class="message-channel-info">
                                 <a class="message-channel-name channel-name-link" data-channel-id="${msg.channel_id}">${escapeHtml(msg.channel_title || '')}<span class="debug-channel-id">[${msg.channel_id}]</span></a>
-                                <div class="message-date">${date}</div>
+                                <a class="message-date" href="${telegramLink}" target="_blank" title="Open in Telegram">${date}</a>
                             </div>
                         </div>
                         ${duplicateIndicator}
@@ -3140,6 +3442,41 @@
             return null;
         }
 
+        // Get media URL for local path only
+        function getMediaUrl(item) {
+            if (item.path) {
+                return `/media/${item.path}`;
+            }
+            return null;
+        }
+
+        // Check if media needs to be downloaded
+        function needsDownload(item) {
+            return !item.path && item.type;
+        }
+
+        // Render media placeholder with download button
+        function renderMediaPlaceholder(channelId, messageId, mediaType) {
+            const icon = mediaType === 'video' ? '🎬' : mediaType === 'photo' ? '🖼️' : '📄';
+            return `<div class="message-media">
+                <div class="media-placeholder" data-channel="${channelId}" data-message="${messageId}">
+                    <button class="download-btn" onclick="downloadMedia(this, ${channelId}, ${messageId})">
+                        <span class="icon">${icon}</span>
+                        <span class="label">Download</span>
+                    </button>
+                </div>
+            </div>`;
+        }
+
+        // Render image - either from local path or show download button
+        function renderImage(item, channelId, messageId) {
+            if (needsDownload(item)) {
+                return renderMediaPlaceholder(channelId, item.message_id || messageId, 'photo');
+            }
+            const mediaUrl = getMediaUrl(item);
+            return `<div class="message-media"><img src="${mediaUrl}" alt="" loading="lazy"></div>`;
+        }
+
         // Detect effective media type from file extension
         function getEffectiveMediaType(item) {
             const type = item.type || 'document';
@@ -3160,10 +3497,12 @@
         }
 
         // Render audio player with filename
-        function renderAudioPlayer(item) {
-            const mediaUrl = `/media/${item.path}`;
-            // Split on both forward and back slashes to handle different path formats
-            const fileName = item.path ? item.path.split(/[/\\]/).pop() : 'Audio';
+        function renderAudioPlayer(item, channelId, messageId) {
+            if (needsDownload(item)) {
+                return renderMediaPlaceholder(channelId, item.message_id || messageId, 'audio');
+            }
+            const mediaUrl = getMediaUrl(item);
+            const fileName = item.path.split(/[/\\]/).pop();
 
             return `
                 <div class="audio-player">
@@ -3174,10 +3513,12 @@
         }
 
         // Render file attachment for non-image/video media
-        function renderFileAttachment(item) {
-            const mediaUrl = `/media/${item.path}`;
-            // Split on both forward and back slashes to handle different path formats
-            const fileName = item.path ? item.path.split(/[/\\]/).pop() : 'File';
+        function renderFileAttachment(item, channelId, messageId) {
+            if (needsDownload(item)) {
+                return renderMediaPlaceholder(channelId, item.message_id || messageId, item.type || 'document');
+            }
+            const mediaUrl = getMediaUrl(item);
+            const fileName = item.path.split(/[/\\]/).pop();
             const mediaType = item.type || 'document';
 
             // Get icon based on type
@@ -3195,6 +3536,12 @@
             } else if (mediaType === 'animation') {
                 icon = '&#127916;'; // Film frames
                 iconClass = 'document';
+            } else if (mediaType === 'photo') {
+                icon = '&#128247;'; // Camera
+                iconClass = 'photo';
+            } else if (mediaType === 'video') {
+                icon = '&#127910;'; // Clapper board
+                iconClass = 'video';
             }
 
             // Format type label
@@ -3212,8 +3559,11 @@
         }
 
         // Render video with optional thumbnail
-        function renderVideo(item) {
-            const mediaUrl = `/media/${item.path}`;
+        function renderVideo(item, channelId, messageId) {
+            if (needsDownload(item)) {
+                return renderMediaPlaceholder(channelId, item.message_id || messageId, 'video');
+            }
+            const mediaUrl = getMediaUrl(item);
             const thumbPath = item.video_thumbnail_path;
 
             if (thumbPath) {
@@ -3499,7 +3849,7 @@
                         }
 
                         // Add full-size media if available
-                        if (msg.media_path && msg.media_type) {
+                        if (msg.media_type && msg.media_path) {
                             const mediaUrl = `/media/${msg.media_path}`;
                             const effectiveType = getEffectiveMediaTypeFromPath(msg.media_type, msg.media_path);
 
@@ -3507,7 +3857,6 @@
                             if (effectiveType === 'photo') {
                                 html += `<img src="${mediaUrl}" alt="" loading="lazy">`;
                             } else if (effectiveType === 'video') {
-                                // Check for thumbnail
                                 if (msg.video_thumbnail_path) {
                                     html += `<div class="video-thumbnail-container" data-video-src="${mediaUrl}">
                                         <img src="/media/${msg.video_thumbnail_path}" alt="" loading="lazy" class="video-thumbnail">
@@ -3519,11 +3868,20 @@
                             } else if (effectiveType === 'audio' || effectiveType === 'voice') {
                                 html += `<audio src="${mediaUrl}" controls preload="none"></audio>`;
                             } else {
-                                // Document or other - show as link
                                 const filename = msg.media_path.split('/').pop();
                                 html += `<a href="${mediaUrl}" target="_blank">📄 ${escapeHtml(filename)}</a>`;
                             }
                             html += '</div>';
+                        } else if (msg.media_type && !msg.media_path) {
+                            // Media not downloaded - show download button
+                            html += `<div class="message-reply-media">
+                                <div class="media-placeholder" data-channel="${channelId}" data-message="${replyToId}">
+                                    <button class="download-btn" onclick="downloadMedia(this, ${channelId}, ${replyToId})">
+                                        <span class="icon">📥</span>
+                                        <span class="label">Download</span>
+                                    </button>
+                                </div>
+                            </div>`;
                         }
 
                         // Show placeholder if no content
@@ -3641,6 +3999,10 @@
                 input.addEventListener('change', handleBackupPathChange);
             });
 
+            document.querySelectorAll('.media-setting').forEach(checkbox => {
+                checkbox.addEventListener('change', handleMediaSettingChange);
+            });
+
             document.querySelectorAll('.group-select').forEach(select => {
                 select.addEventListener('change', handleGroupChange);
             });
@@ -3722,6 +4084,24 @@
                             ${groupOptions}
                         </select>
                     </div>
+                    <div class="channel-media-settings" style="display: ${channel.active && !channel.download_all ? 'flex' : 'none'};">
+                        <label class="media-setting-label" title="Download images">
+                            <input type="checkbox" class="media-setting" data-channel-id="${channel.id}" data-media-type="images" ${channel.download_images ? 'checked' : ''}>
+                            <span class="media-icon">&#128247;</span>
+                        </label>
+                        <label class="media-setting-label" title="Download videos">
+                            <input type="checkbox" class="media-setting" data-channel-id="${channel.id}" data-media-type="videos" ${channel.download_videos ? 'checked' : ''}>
+                            <span class="media-icon">&#127910;</span>
+                        </label>
+                        <label class="media-setting-label" title="Download audio">
+                            <input type="checkbox" class="media-setting" data-channel-id="${channel.id}" data-media-type="audio" ${channel.download_audio ? 'checked' : ''}>
+                            <span class="media-icon">&#127925;</span>
+                        </label>
+                        <label class="media-setting-label" title="Download other files">
+                            <input type="checkbox" class="media-setting" data-channel-id="${channel.id}" data-media-type="other" ${channel.download_other ? 'checked' : ''}>
+                            <span class="media-icon">&#128196;</span>
+                        </label>
+                    </div>
                     <div class="channel-backup-path" style="display: ${channel.download_all ? 'block' : 'none'};">
                         <input type="text" class="backup-path-input" data-channel-id="${channel.id}"
                                placeholder="Backup path (optional)"
@@ -3741,6 +4121,34 @@
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({active})
             });
+
+            // Show/hide media settings based on active and download_all state
+            const channelItem = e.target.closest('.channel-item');
+            const mediaSettingsDiv = channelItem.querySelector('.channel-media-settings');
+            const downloadAllToggle = channelItem.querySelector('.download-all-toggle');
+            const downloadAll = downloadAllToggle && downloadAllToggle.checked;
+
+            if (mediaSettingsDiv) {
+                mediaSettingsDiv.style.display = active && !downloadAll ? 'flex' : 'none';
+            }
+        }
+
+        async function handleMediaSettingChange(e) {
+            const channelId = e.target.dataset.channelId;
+            const channelItem = e.target.closest('.channel-item');
+
+            // Gather all media settings for this channel
+            const settings = {};
+            channelItem.querySelectorAll('.media-setting').forEach(cb => {
+                const type = cb.dataset.mediaType;
+                settings['download_' + type] = cb.checked;
+            });
+
+            await fetch(`/api/channel/${channelId}/media_settings`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(settings)
+            });
         }
 
         async function handleDownloadAllToggle(e) {
@@ -3753,11 +4161,18 @@
                 body: JSON.stringify({download_all: downloadAll})
             });
 
-            // Show/hide backup path input
+            // Show/hide backup path input and media settings
             const channelItem = e.target.closest('.channel-item');
             const backupPathDiv = channelItem.querySelector('.channel-backup-path');
+            const mediaSettingsDiv = channelItem.querySelector('.channel-media-settings');
+            const activeToggle = channelItem.querySelector('.active-toggle');
+            const isActive = activeToggle && activeToggle.checked;
+
             if (backupPathDiv) {
                 backupPathDiv.style.display = downloadAll ? 'block' : 'none';
+            }
+            if (mediaSettingsDiv) {
+                mediaSettingsDiv.style.display = isActive && !downloadAll ? 'flex' : 'none';
             }
         }
 

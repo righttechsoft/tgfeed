@@ -1,12 +1,13 @@
 """Web UI for TGFeed."""
 
+import asyncio
 import json
 import logging
 import time
 from bottle import Bottle, request, response, static_file, TEMPLATE_PATH
 from pathlib import Path
 
-from config import DATA_DIR
+from config import DATA_DIR, MEDIA_DIR, WEB_HOST, WEB_PORT, PAUSE_FILE
 from database import Database
 
 # Configure logging
@@ -156,6 +157,21 @@ def update_backup_path(channel_id):
     return json.dumps({"success": True})
 
 
+@app.route("/api/channel/<channel_id:int>/media_settings", method="POST")
+def update_media_settings(channel_id):
+    """Update channel media download settings."""
+    response.content_type = "application/json"
+    data = request.json
+    images = 1 if data.get("download_images") else 0
+    videos = 1 if data.get("download_videos") else 0
+    audio = 1 if data.get("download_audio") else 0
+    other = 1 if data.get("download_other") else 0
+    with Database() as db:
+        db.update_channel_media_settings(channel_id, images, videos, audio, other)
+        db.commit()
+    return json.dumps({"success": True})
+
+
 @app.route("/media/<filepath:path>")
 def serve_media(filepath):
     """Serve media files with cache headers."""
@@ -213,6 +229,109 @@ def get_channel_photo(channel_id):
     return ""
 
 
+@app.route("/api/download-media/<channel_id:int>/<message_id:int>", method="POST")
+def download_media(channel_id, message_id):
+    """Download media immediately from Telegram."""
+    import concurrent.futures
+    import threading
+
+    logger.info(f"Download media request: channel={channel_id}, message={message_id}")
+    response.content_type = "application/json"
+
+    with Database() as db:
+        msg = db.get_message(channel_id, message_id)
+        if not msg:
+            response.status = 404
+            return json.dumps({"error": "Message not found"})
+
+        if msg.get("media_path"):
+            return json.dumps({"path": msg["media_path"]})
+
+        if not msg.get("media_type"):
+            response.status = 404
+            return json.dumps({"error": "No media in this message"})
+
+        channel = db.get_channel_by_id(channel_id)
+        if not channel:
+            response.status = 404
+            return json.dumps({"error": "Channel not found"})
+
+    access_hash = channel["access_hash"]
+    dest_dir = str(MEDIA_DIR)
+
+    # Create pause file to signal sync scripts to pause
+    try:
+        PAUSE_FILE.touch()
+        logger.info(f"Created pause file: {PAUSE_FILE}")
+    except Exception as e:
+        logger.warning(f"Could not create pause file: {e}")
+
+    def do_download():
+        """Run download in a new event loop in this thread."""
+        import asyncio
+        from tg_client import TGClient, TGClientConnectionError
+
+        logger.info(f"do_download started in thread")
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            async def download_async():
+                try:
+                    logger.info(f"Connecting to TGClient...")
+                    async with TGClient() as client:
+                        logger.info(f"Connected, calling download_media...")
+                        result = await client.download_media(
+                            channel_id, access_hash, message_id, dest_dir
+                        )
+                        logger.info(f"download_media returned: {result}")
+                        return result
+                except TGClientConnectionError as e:
+                    logger.error(f"TGClientConnectionError: {e}")
+                    return {"error": "Daemon not running"}
+                except Exception as e:
+                    logger.error(f"Download error: {e}")
+                    return {"error": str(e)}
+
+            return loop.run_until_complete(download_async())
+        finally:
+            loop.close()
+            logger.info(f"do_download thread finished")
+
+    # Run in thread pool - sync should pause due to pause file
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(do_download)
+            result = future.result()  # No timeout - large files may take hours
+    except Exception as e:
+        logger.error(f"Download failed: {e}")
+        response.status = 503
+        return json.dumps({"error": str(e)})
+    finally:
+        # Remove pause file
+        try:
+            if PAUSE_FILE.exists():
+                PAUSE_FILE.unlink()
+                logger.info(f"Removed pause file")
+        except Exception as e:
+            logger.warning(f"Could not remove pause file: {e}")
+
+    if not result:
+        response.status = 503
+        return json.dumps({"error": "Download returned no result"})
+
+    if "error" in result:
+        response.status = 503
+        return json.dumps(result)
+
+    if result.get("path"):
+        with Database() as db:
+            db.update_message_media(channel_id, message_id, result["path"], media_pending=0)
+        logger.info(f"Downloaded media: {result['path']}")
+        return json.dumps({"path": result["path"]})
+
+    return json.dumps({"error": "Download failed"})
+
+
 @app.route("/api/group/<group_id:int>/messages")
 def get_group_messages(group_id):
     """Get unread messages for a group, optionally filtered to a single channel."""
@@ -237,6 +356,29 @@ def get_earlier_messages(group_id):
         return json.dumps([])
     with Database() as db:
         messages = db.get_earlier_messages_by_group(group_id, before_date, limit, channel_id)
+        return json.dumps(messages)
+
+
+@app.route("/api/channel/<channel_id:int>/oldest")
+def get_oldest_messages(channel_id):
+    """Get the oldest messages for a channel."""
+    response.content_type = "application/json"
+    limit = int(request.query.get("limit", 50))
+    with Database() as db:
+        messages = db.get_oldest_messages(channel_id, limit)
+        return json.dumps(messages)
+
+
+@app.route("/api/channel/<channel_id:int>/later")
+def get_later_messages(channel_id):
+    """Get messages newer than a given date for a channel."""
+    response.content_type = "application/json"
+    after_date = int(request.query.get("after", 0))
+    limit = int(request.query.get("limit", 50))
+    if after_date <= 0:
+        return json.dumps([])
+    with Database() as db:
+        messages = db.get_later_messages(channel_id, after_date, limit)
         return json.dumps(messages)
 
 
@@ -364,6 +506,7 @@ def search_messages():
             msg = db.get_message(result["channel_id"], result["message_id"])
             if msg:
                 msg["channel_title"] = result["channel_title"]
+                msg["channel_username"] = result.get("channel_username")
                 msg["channel_id"] = result["channel_id"]
                 msg["search_query"] = query  # Pass query for frontend highlighting
                 # Handle media items for consistency with other endpoints
@@ -394,9 +537,8 @@ def search_stats():
 
 def main():
     """Run the web server."""
-    print("Starting TGFeed Web UI at http://localhost:8910")
-    #app.run(host="localhost", port=8910, server="waitress")
-    app.run(host="192.168.14.23", port=8910, server="waitress")
+    print(f"Starting TGFeed Web UI at http://{WEB_HOST}:{WEB_PORT}")
+    app.run(host=WEB_HOST, port=WEB_PORT, server="waitress")
 
 
 if __name__ == "__main__":

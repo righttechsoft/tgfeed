@@ -16,7 +16,7 @@ tgfeed/
 ├── sync_read_to_tg.py     # Syncs read status from TGFeed to Telegram
 ├── download_telegraph.py  # Downloads telegra.ph pages with embedded images
 ├── generate_thumbnails.py # Creates video thumbnails (2x2 grid) using ffmpeg
-├── generate_content_hashes.py # LLM-based content deduplication via Mistral API
+├── generate_content_hashes.py # LLM-based content deduplication via Claude API
 ├── index_search.py        # Indexes messages for full-text search (FTS5)
 ├── cleanup.py             # Removes old messages from non-archived channels
 ├── orchestrator.py        # TUI for managing all scripts (start/stop/logs)
@@ -59,6 +59,10 @@ Stores Telegram channel metadata:
 - `download_all` - 1 to download full history (backward sync)
 - `last_active` - Timestamp of last new message download
 - `backup_path` - Path to Telegram Desktop backup folder (for media recovery)
+- `download_images` - 1 to download images for new messages (when not download_all)
+- `download_videos` - 1 to download videos for new messages (when not download_all)
+- `download_audio` - 1 to download audio/voice for new messages (when not download_all)
+- `download_other` - 1 to download other files for new messages (when not download_all)
 
 ### `groups` table
 User-defined groups for organizing channels:
@@ -183,12 +187,21 @@ Async client library for communicating with tg_daemon:
    - Get `latest_id` from database
    - If no messages: download only the latest message (first sync)
    - Otherwise: download all messages newer than `latest_id`
-   - Download media (photos, videos, documents) without timeout
+   - Check channel media settings (`download_images`, `download_videos`, etc.)
+   - For channels with `download_all=0`: only download media types with flag=1
+   - For channels with `download_all=1`: download all media types
+   - Media not downloaded due to settings: saved with `media_type` but no `media_path`
    - If media download fails: set `media_pending=1`
    - Update `last_active` timestamp if new messages found
 
 2. After forward sync, retry pending media downloads (up to 5 per channel):
    - Query messages with `media_pending=1` and `media_path IS NULL`
+
+**Media type mapping:**
+- `photo` -> `download_images` flag
+- `video` -> `download_videos` flag
+- `audio`, `voice` -> `download_audio` flag
+- Everything else (document, sticker, etc.) -> `download_other` flag
    - Re-fetch message from Telegram and attempt download
    - On success: update `media_path` and clear `media_pending`
 
@@ -200,6 +213,8 @@ Async client library for communicating with tg_daemon:
 ### sync_history.py
 
 **Backward sync (full history download):**
+Runs in a continuous loop with 60-second pause between runs.
+
 1. For each channel with `download_all=1`:
    - Get `oldest_id` from database
    - Download batch of messages older than `oldest_id`
@@ -240,9 +255,9 @@ Creates video thumbnails using ffmpeg:
 4. Updates `video_thumbnail_path` in database
 
 ### generate_content_hashes.py
-LLM-based content deduplication using Mistral API:
+LLM-based content deduplication using Claude API:
 1. Queries messages without content hash (min length configurable)
-2. Sends message text to Mistral for normalization/summarization
+2. Sends message text to Claude for normalization/summarization
 3. Hashes the normalized summary
 4. Stores hash in message table and registers in `content_hashes` lookup table
 5. If hash already exists, marks message as duplicate of the original
@@ -261,11 +276,11 @@ Run periodically (e.g., in sync_service) to keep search index up to date.
 ### cleanup.py
 Removes old messages to save disk space:
 1. For channels without `download_all=1`:
-   - Delete messages older than 30 days
+   - Delete messages older than 30 days (always keeps at least one message - the most recent)
    - Delete associated media files
    - Remove entries from FTS search index
    - Remove empty media directories
-2. Channels with `download_all=1` are preserved
+2. Channels with `download_all=1` are preserved entirely
 
 ## Web UI Architecture
 
@@ -280,6 +295,8 @@ Bottle framework with Waitress server (multi-threaded for concurrent requests).
 - `DELETE /api/group/{id}` - Delete group
 - `GET /api/group/{id}/messages?limit=N&channel=ID` - Unread messages for group
 - `GET /api/group/{id}/earlier?before=TIMESTAMP&limit=N&channel=ID` - Earlier (read) messages
+- `GET /api/channel/{id}/oldest?limit=N` - Oldest messages for a channel (for "jump to oldest")
+- `GET /api/channel/{id}/later?after=TIMESTAMP&limit=N` - Messages newer than timestamp (for scroll-down loading)
 - `GET /api/message/{channel_id}/{message_id}` - Single message by ID
 - `GET /api/bookmarks?limit=N` - All bookmarked messages (newest first)
 - `GET /api/search?q=QUERY&limit=N&channel=ID&group=ID` - Full-text search (min 3 chars)
@@ -288,6 +305,8 @@ Bottle framework with Waitress server (multi-threaded for concurrent requests).
 - `POST /api/channel/{id}/group` - Set channel's group
 - `POST /api/channel/{id}/download_all` - Toggle history download
 - `POST /api/channel/{id}/backup_path` - Set backup path for media recovery
+- `POST /api/channel/{id}/media_settings` - Set media download flags (images, videos, audio, other)
+- `GET /api/live-media/{channel_id}/{message_id}` - Stream media from Telegram on-demand (transparent, no save)
 - `POST /api/messages/read` - Mark messages as read (batch)
 - `POST /api/message/rate` - Set rating (-1, 0, 1)
 - `POST /api/message/bookmark` - Toggle bookmark
@@ -330,12 +349,16 @@ Single-page app with vanilla JavaScript. No build step.
 *Channel management (sidebar):*
 - Active toggle - enable/disable message downloading
 - "All" checkbox - enable full history download
+- Media type toggles (visible when active but not "All"):
+  - Images, Videos, Audio, Other - select which media types to download
+  - Unselected types can still be viewed via live-view on demand
 - Backup path input - set local backup folder for media recovery
 - Group dropdown - assign channel to group
 - Stats: unread count, bookmarks, likes/dislikes
 
 *Message display:*
 - Message cards with channel icon, title, date, text, media
+- Clickable timestamps link to original message on Telegram (t.me)
 - Album support: messages with same `grouped_id` combined
 - Reply quotes: fetches and displays replied-to message with full media
 - Entity rendering: Bold, italic, links, code blocks
@@ -353,16 +376,21 @@ Single-page app with vanilla JavaScript. No build step.
 - Video thumbnails (2x2 grid) with click to play
 - Audio players with filename display
 - File attachments with type icons
+- Live-view: media not downloaded locally streams transparently from Telegram
+  - No visual difference between local and streamed media
+  - Streams via daemon without saving to disk
 
 *User interactions:*
 - Skip button (↓) - floating on left, scrolls to next message
+- Jump to oldest button (↑) - appears when channel is filtered, jumps to first message
 - Rating buttons (thumbs up/down)
 - Bookmark button
 - Scroll-based read tracking with IntersectionObserver
 
 *Load more:*
 - Scroll to top loads earlier (read) messages
-- Maintains scroll position when prepending
+- Scroll to bottom loads later messages (when viewing from oldest)
+- Maintains scroll position when prepending/appending
 
 *Debug mode (Ctrl+D):*
 - Shows channel IDs next to channel names
@@ -389,9 +417,9 @@ TG_DAEMON_PORT=9876
 WEB_HOST=0.0.0.0
 WEB_PORT=8910
 
-# Mistral API for content deduplication (optional)
-MISTRAL_API_KEY=your_mistral_api_key
-MISTRAL_MODEL=mistral-small-latest
+# Claude API for content deduplication (optional)
+ANTHROPIC_API_KEY=your_anthropic_api_key
+CLAUDE_MODEL=claude-haiku-4-5
 
 # Deduplication settings (optional)
 DEDUP_MIN_MESSAGE_LENGTH=50
@@ -439,7 +467,7 @@ web.bat
 orchestrator.bat   # Windows
 ./orchestrator.sh  # Linux/macOS
 ```
-The orchestrator provides a terminal UI to start/stop scripts, view their status and logs. **On launch, it automatically starts everything:** both daemons (Telegram + Web), both chains (sync + maintenance), and the history script. When a script fails (non-zero exit code), full logs are saved to `data/logs/{script}_{timestamp}.log`.
+The orchestrator provides a terminal UI to start/stop scripts, view their status and logs. **On launch, it automatically starts everything:** both daemons (Telegram + Web), both chains (sync + maintenance), and the history script. Uses file-based logging for stability (writes to temp files, reads for display). When a script fails (non-zero exit code), full logs are saved to `data/logs/{script}_{timestamp}.log`.
 
 **Orchestrator controls:**
 - `↑/↓` or `j/k` - Navigate scripts (auto-shows logs for selected script)
@@ -481,7 +509,7 @@ uv run python cleanup.py              # Clean up old messages
 - requests - HTTP client (for telegraph downloads)
 - rich - Terminal UI for orchestrator
 - ffmpeg (system) - For video thumbnail generation (optional)
-- mistralai - For content deduplication (optional)
+- Claude API - For content deduplication (optional, uses requests library)
 
 ## Database Migrations
 

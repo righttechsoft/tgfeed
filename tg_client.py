@@ -99,13 +99,16 @@ class TGClient:
             }
 
             try:
+                logger.debug(f"RPC call: {method} (id={self._request_id})")
                 self._writer.write(json.dumps(request).encode() + b'\n')
                 await self._writer.drain()
+                logger.debug(f"RPC sent, waiting for response...")
 
                 response_line = await self._reader.readline()
                 if not response_line:
                     raise TGClientConnectionError("Connection closed by daemon")
 
+                logger.debug(f"RPC response received: {len(response_line)} bytes")
                 response = json.loads(response_line.decode())
 
                 if "error" in response:

@@ -10,9 +10,11 @@ from config import MEDIA_DIR, validate_config
 from database import Database
 
 # Configure logging with UTF-8 support for Windows
-import io
+import os
 if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    os.system('')  # Enable ANSI escape sequences
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,11 +74,18 @@ def cleanup_old_messages() -> None:
                     # Table doesn't exist - channel has no messages yet
                     continue
 
+                # Find the most recent message to always keep at least one
+                cursor.execute(f"SELECT MAX(id) FROM {table_name}")
+                max_id_row = cursor.fetchone()
+                max_id = max_id_row[0] if max_id_row and max_id_row[0] else None
+                if max_id is None:
+                    continue
+
                 # First, get IDs and media paths for messages we're about to delete
                 cursor.execute(f"""
                     SELECT id, media_path FROM {table_name}
-                    WHERE date < ?
-                """, (cutoff_date,))
+                    WHERE date < ? AND id != ?
+                """, (cutoff_date, max_id))
                 old_messages = cursor.fetchall()
 
                 if not old_messages:
@@ -109,10 +118,10 @@ def cleanup_old_messages() -> None:
                 """, [channel_id] + message_ids)
                 fts_deleted = cursor.rowcount
 
-                # Delete old messages from database
+                # Delete old messages from database (keep most recent)
                 cursor.execute(f"""
-                    DELETE FROM {table_name} WHERE date < ?
-                """, (cutoff_date,))
+                    DELETE FROM {table_name} WHERE date < ? AND id != ?
+                """, (cutoff_date, max_id))
                 messages_deleted = cursor.rowcount
 
                 db.commit()

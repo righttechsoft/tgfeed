@@ -5,10 +5,17 @@ Uses tg_daemon if available, falls back to direct Telethon connection.
 
 import asyncio
 import logging
+import os
 import sys
 
 from database import Database, DatabaseMigration
 from tg_client import TGClient, TGClientConnectionError, TGFloodWaitError, is_daemon_running
+
+# Configure UTF-8 output for Windows
+if sys.platform == "win32":
+    os.system('')  # Enable ANSI escape sequences
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 # Configure logging
 logging.basicConfig(

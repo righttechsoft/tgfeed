@@ -19,14 +19,19 @@ SESSION_PATH = DATA_DIR / "session"  # Legacy single-session path
 SESSIONS_DIR = DATA_DIR / "sessions"  # Per-credential session files
 MEDIA_DIR = DATA_DIR / "media"
 DATABASE_PATH = DATA_DIR / "tgfeed.db"
+PAUSE_FILE = DATA_DIR / ".pause"  # Webui creates this to pause sync
 
 # Telegram daemon settings
 TG_DAEMON_HOST = os.getenv("TG_DAEMON_HOST", "127.0.0.1")
 TG_DAEMON_PORT = int(os.getenv("TG_DAEMON_PORT", "9876"))
 
-# Mistral API (for content deduplication)
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
-MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
+# Web UI settings
+WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
+WEB_PORT = int(os.getenv("WEB_PORT", "8910"))
+
+# Claude API (for content deduplication)
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-5-haiku-20241022")
 
 # Deduplication settings
 DEDUP_MIN_MESSAGE_LENGTH = int(os.getenv("DEDUP_MIN_MESSAGE_LENGTH", "50"))

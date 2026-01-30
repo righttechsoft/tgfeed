@@ -15,9 +15,11 @@ from config import DATA_DIR, validate_config
 from database import Database, DatabaseMigration
 
 # Configure logging with UTF-8 support for Windows
-import io
+import os
 if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    os.system('')  # Enable ANSI escape sequences
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 logging.basicConfig(
     level=logging.INFO,

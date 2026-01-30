@@ -10,14 +10,26 @@ import sys
 import time
 from pathlib import Path
 
-from config import MEDIA_DIR
+from config import MEDIA_DIR, PAUSE_FILE
 from database import Database, DatabaseMigration
+
+
+def check_pause():
+    """Check if webui requested a pause. If so, wait until released."""
+    if PAUSE_FILE.exists():
+        logger.info("Pause requested by webui, waiting...")
+        while PAUSE_FILE.exists():
+            time.sleep(0.5)
+        logger.info("Pause released, resuming")
 from tg_client import TGClient, TGClientConnectionError, TGFloodWaitError, is_daemon_running
 
 # Configure logging with UTF-8 support for Windows
 import io
+import os
 if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    os.system('')  # Enable ANSI escape sequences
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,6 +40,35 @@ logger = logging.getLogger(__name__)
 
 # Concurrency settings for media downloads
 CONCURRENT_DOWNLOADS = 5
+
+
+def should_download_media(media_type: str | None, settings: dict) -> bool:
+    """Check if media should be downloaded based on channel settings.
+
+    Args:
+        media_type: The Telegram media type (photo, video, audio, voice, document, etc.)
+        settings: Channel media settings dict with download_images, download_videos, etc.
+
+    Returns:
+        True if media should be downloaded, False otherwise.
+    """
+    # If download_all is set, always download
+    if settings.get("download_all"):
+        return True
+
+    if not media_type:
+        return False
+
+    # Map media types to settings flags
+    if media_type == "photo":
+        return bool(settings.get("download_images"))
+    elif media_type == "video":
+        return bool(settings.get("download_videos"))
+    elif media_type in ("audio", "voice"):
+        return bool(settings.get("download_audio"))
+    else:
+        # document, sticker, animation, webpage, etc.
+        return bool(settings.get("download_other"))
 
 
 async def sync_messages_via_daemon() -> None:
@@ -54,6 +95,7 @@ async def sync_messages_via_daemon() -> None:
         download_semaphore = asyncio.Semaphore(CONCURRENT_DOWNLOADS)
 
         for channel in channels:
+            check_pause()  # Allow webui to interrupt
             channel_id = channel["id"]
             channel_title = channel["title"]
             access_hash = channel["access_hash"]
@@ -65,6 +107,7 @@ async def sync_messages_via_daemon() -> None:
                 db.commit()
                 latest_id = db.get_latest_message_id(channel_id)
                 is_first_sync = latest_id is None
+                media_settings = db.get_channel_media_settings(channel_id)
 
                 if latest_id:
                     logger.info(f"  Latest message ID in DB: {latest_id}")
@@ -100,11 +143,15 @@ async def sync_messages_via_daemon() -> None:
                 else:
                     logger.info(f"  Fetched {len(raw_messages)} messages, downloading media...")
 
-                    # Phase 2: Download media concurrently
-                    async def download_with_semaphore(msg: dict) -> tuple[int, str | None]:
+                    # Phase 2: Download media concurrently (respecting media settings)
+                    async def download_with_semaphore(msg: dict) -> tuple[int, str | None, bool]:
+                        """Returns (msg_id, path, was_skipped_by_settings)"""
                         async with download_semaphore:
                             if not msg.get("has_media") or msg.get("is_poll"):
-                                return (msg["id"], None)
+                                return (msg["id"], None, False)
+                            # Check if we should download this media type
+                            if not should_download_media(msg.get("media_type"), media_settings):
+                                return (msg["id"], None, True)  # Skipped by settings
                             # Pass MEDIA_DIR - daemon adds channel_id subfolder
                             result = await client.download_media(
                                 channel_id, access_hash, msg["id"], str(MEDIA_DIR)
@@ -112,31 +159,38 @@ async def sync_messages_via_daemon() -> None:
                             path = result.get("path")
                             if path:
                                 logger.info(f"    Downloaded media: {path}")
-                            return (msg["id"], path)
+                            return (msg["id"], path, False)
 
                     tasks = [download_with_semaphore(msg) for msg in raw_messages]
                     results = await asyncio.gather(*tasks, return_exceptions=True)
 
                     media_paths = {}
+                    skipped_by_settings = set()
                     for result in results:
                         if isinstance(result, Exception):
                             logger.error(f"    Media download error: {result}")
                             continue
-                        msg_id, path = result
+                        msg_id, path, was_skipped = result
                         if path:
                             media_paths[msg_id] = path
+                        if was_skipped:
+                            skipped_by_settings.add(msg_id)
 
                     # Phase 3: Build message dicts and insert
                     collected_messages = []
                     media_count = 0
+                    skipped_count = 0
                     now = int(time.time())
 
                     for msg in raw_messages:
                         media_path = media_paths.get(msg["id"])
                         has_media = msg.get("has_media", False) and not msg.get("is_poll", False)
+                        was_skipped = msg["id"] in skipped_by_settings
 
                         if media_path:
                             media_count += 1
+                        if was_skipped:
+                            skipped_count += 1
 
                         # Convert daemon message format to database format
                         data = {
@@ -164,7 +218,8 @@ async def sync_messages_via_daemon() -> None:
                             "created_at": now,
                         }
 
-                        if has_media and not media_path:
+                        # Only mark as pending if download failed (not if skipped by settings)
+                        if has_media and not media_path and not was_skipped:
                             data["media_pending"] = 1
                             logger.warning(f"    Media download failed for message {msg['id']}, marked as pending")
 
@@ -177,7 +232,10 @@ async def sync_messages_via_daemon() -> None:
                             db.update_channel_last_active(channel_id, now)
                             db.commit()
 
-                    logger.info(f"  Downloaded {message_count} new messages, {media_count} media files")
+                    log_msg = f"  Downloaded {message_count} new messages, {media_count} media files"
+                    if skipped_count > 0:
+                        log_msg += f" ({skipped_count} media skipped by settings)"
+                    logger.info(log_msg)
 
             except TGFloodWaitError as e:
                 logger.warning(f"  FloodWait: must wait {e.seconds} seconds, skipping to next channel")
@@ -406,6 +464,7 @@ async def sync_messages_direct() -> None:
         download_semaphore = asyncio.Semaphore(CONCURRENT_DOWNLOADS)
 
         for channel in channels:
+            check_pause()  # Allow webui to interrupt
             channel_id = channel["id"]
             channel_title = channel["title"]
             access_hash = channel["access_hash"]
@@ -417,6 +476,7 @@ async def sync_messages_direct() -> None:
                 db.commit()
                 latest_id = db.get_latest_message_id(channel_id)
                 is_first_sync = latest_id is None
+                media_settings = db.get_channel_media_settings(channel_id)
 
                 if latest_id:
                     logger.info(f"  Latest message ID in DB: {latest_id}")
@@ -450,35 +510,52 @@ async def sync_messages_direct() -> None:
                     messages_with_media = [(msg, idx) for idx, msg in enumerate(raw_messages) if has_downloadable_media(msg)]
 
                     media_paths: dict[int, str | None] = {}
+                    skipped_by_settings: set[int] = set()
                     if messages_with_media:
-                        logger.info(f"  Downloading {len(messages_with_media)} media files...")
+                        # Filter by media settings
+                        messages_to_download = []
+                        for msg, idx in messages_with_media:
+                            msg_media_type = get_media_type(msg.media)
+                            if should_download_media(msg_media_type, media_settings):
+                                messages_to_download.append((msg, idx))
+                            else:
+                                skipped_by_settings.add(idx)
 
-                        async def download_with_semaphore(msg: Message, idx: int) -> tuple[int, str | None]:
-                            async with download_semaphore:
-                                path = await download_media(client, msg, channel_id)
-                                if path:
-                                    logger.info(f"    Downloaded media: {path}")
-                                return (idx, path)
+                        if messages_to_download:
+                            logger.info(f"  Downloading {len(messages_to_download)} media files...")
 
-                        tasks = [download_with_semaphore(msg, idx) for msg, idx in messages_with_media]
-                        results = await asyncio.gather(*tasks, return_exceptions=True)
+                            async def download_with_semaphore(msg: Message, idx: int) -> tuple[int, str | None]:
+                                async with download_semaphore:
+                                    path = await download_media(client, msg, channel_id)
+                                    if path:
+                                        logger.info(f"    Downloaded media: {path}")
+                                    return (idx, path)
 
-                        for result in results:
-                            if isinstance(result, Exception):
-                                logger.error(f"    Media download error: {result}")
-                                continue
-                            idx, path = result
-                            media_paths[idx] = path
+                            tasks = [download_with_semaphore(msg, idx) for msg, idx in messages_to_download]
+                            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                            for result in results:
+                                if isinstance(result, Exception):
+                                    logger.error(f"    Media download error: {result}")
+                                    continue
+                                idx, path = result
+                                media_paths[idx] = path
+
+                        if skipped_by_settings:
+                            logger.info(f"  Skipped {len(skipped_by_settings)} media files by settings")
 
                     collected_messages = []
                     media_count = 0
+                    skipped_count = len(skipped_by_settings)
                     for idx, msg in enumerate(raw_messages):
                         media_path = media_paths.get(idx)
                         has_media = has_downloadable_media(msg)
+                        was_skipped = idx in skipped_by_settings
                         if media_path:
                             media_count += 1
                         data = message_to_dict(msg, media_path)
-                        if has_media and not media_path:
+                        # Only mark as pending if download failed (not if skipped by settings)
+                        if has_media and not media_path and not was_skipped:
                             data["media_pending"] = 1
                             logger.warning(f"    Media download failed for message {msg.id}, marked as pending")
                         collected_messages.append(data)
@@ -490,7 +567,10 @@ async def sync_messages_direct() -> None:
                             db.update_channel_last_active(channel_id, int(time.time()))
                             db.commit()
 
-                    logger.info(f"  Downloaded {message_count} new messages, {media_count} media files")
+                    log_msg = f"  Downloaded {message_count} new messages, {media_count} media files"
+                    if skipped_count > 0:
+                        log_msg += f" ({skipped_count} media skipped by settings)"
+                    logger.info(log_msg)
 
             except FloodWaitError as e:
                 logger.warning(f"  FloodWait: must wait {e.seconds} seconds, skipping to next channel")
