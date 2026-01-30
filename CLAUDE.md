@@ -129,6 +129,7 @@ One table per channel for messages. Created on first sync.
 - `read_synced_to_tg` - 1 if read status was synced back to Telegram
 - `rating` - -1 (dislike), 0 (none), 1 (like)
 - `bookmarked` - 1 if saved
+- `anchored` - 1 if anchored (for channel navigation gallery)
 - `html_downloaded` - 1 if telegra.ph page has been downloaded
 - `created_at` - When message was added to database
 
@@ -143,6 +144,7 @@ One table per channel for messages. Created on first sync.
 - `idx_channel_{id}_date` - For date ordering
 - `idx_channel_{id}_read_date` - Composite for unread queries
 - `idx_channel_{id}_bookmarked` - For bookmark queries
+- `idx_channel_{id}_anchored` - For anchor gallery queries
 - `idx_channel_{id}_content_hash` - For duplicate detection
 
 ## Architecture
@@ -310,6 +312,8 @@ Bottle framework with Waitress server (multi-threaded for concurrent requests).
 - `POST /api/messages/read` - Mark messages as read (batch)
 - `POST /api/message/rate` - Set rating (-1, 0, 1)
 - `POST /api/message/bookmark` - Toggle bookmark
+- `POST /api/message/anchor` - Toggle anchor status
+- `GET /api/channel/{id}/anchors` - Get anchored messages for channel (for gallery)
 
 **Static file routes:**
 - `/media/{path}` - Message media (1 year cache, immutable)
@@ -385,7 +389,15 @@ Single-page app with vanilla JavaScript. No build step.
 - Jump to oldest button (↑) - appears when channel is filtered, jumps to first message
 - Rating buttons (thumbs up/down)
 - Bookmark button
+- Anchor button (only in single channel view) - marks message for navigation gallery
 - Scroll-based read tracking with IntersectionObserver
+
+*Anchor gallery (single channel view only):*
+- Vertical thumbnail gallery on left side of screen
+- Shows thumbnails of all anchored messages in the channel
+- Click thumbnail to jump to that message
+- Uses video thumbnails, images, or text preview as thumbnails
+- Hidden on mobile (screen too small)
 
 *Load more:*
 - Scroll to top loads earlier (read) messages

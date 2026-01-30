@@ -1537,6 +1537,110 @@
             height: 18px;
         }
 
+        /* Anchor button */
+        .action-btn.anchor {
+            display: none;
+        }
+
+        .single-channel-view .action-btn.anchor {
+            display: flex;
+        }
+
+        .action-btn.anchor.active {
+            background: #9C27B0;
+            color: white;
+        }
+
+        .anchor-icon {
+            width: 18px;
+            height: 18px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .action-btn.anchor.active .anchor-icon {
+            fill: currentColor;
+        }
+
+        /* Anchor gallery on left side */
+        .anchor-gallery {
+            display: none;
+            position: fixed;
+            left: 8px;
+            top: 72px;
+            bottom: 16px;
+            width: 80px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            overflow-y: auto;
+            z-index: 50;
+            flex-direction: column;
+            gap: 4px;
+            padding: 8px;
+        }
+
+        .single-channel-view .anchor-gallery.has-anchors {
+            display: flex;
+        }
+
+        .anchor-thumb {
+            width: 64px;
+            height: 64px;
+            border-radius: 4px;
+            overflow: hidden;
+            cursor: pointer;
+            background: #f0f0f0;
+            flex-shrink: 0;
+            border: 2px solid transparent;
+            transition: border-color 0.2s, transform 0.2s;
+        }
+
+        .anchor-thumb:hover {
+            border-color: #9C27B0;
+            transform: scale(1.05);
+        }
+
+        .anchor-thumb.active {
+            border-color: #9C27B0;
+        }
+
+        .anchor-thumb img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .anchor-thumb-placeholder {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            color: #888;
+            text-align: center;
+            padding: 4px;
+            word-break: break-word;
+        }
+
+        .anchor-gallery-label {
+            font-size: 10px;
+            color: #666;
+            text-align: center;
+            padding-bottom: 4px;
+            border-bottom: 1px solid #eee;
+            margin-bottom: 4px;
+        }
+
+        /* Adjust main content when anchor gallery is visible */
+        .single-channel-view.has-anchor-gallery .main-content {
+            margin-left: 96px;
+        }
+
         /* Mobile responsive styles */
         @media (max-width: 768px) {
             .feed {
@@ -1600,6 +1704,20 @@
 
             .messages-container {
                 gap: 12px;
+            }
+
+            /* Hide anchor gallery on mobile - too small */
+            .anchor-gallery {
+                display: none !important;
+            }
+
+            .single-channel-view.has-anchor-gallery .main-content {
+                margin-left: 0;
+            }
+
+            /* Show anchor button on mobile too, but without gallery */
+            .single-channel-view .action-btn.anchor {
+                display: flex;
             }
         }
 
@@ -1792,6 +1910,11 @@
         </div>
     </aside>
 
+    <!-- Anchor gallery (left side, only in single channel view) -->
+    <div class="anchor-gallery" id="anchorGallery">
+        <div class="anchor-gallery-label">Anchors</div>
+    </div>
+
     <main class="main-content" id="mainContent">
         <div class="placeholder">
             <p>Select a group from the header to view messages</p>
@@ -1886,6 +2009,11 @@
             } else if (groupId) {
                 currentGroupId = parseInt(groupId);
                 currentChannelId = channelId ? parseInt(channelId) : null;
+                // Set single channel view mode if channel is specified
+                if (currentChannelId) {
+                    document.body.classList.add('single-channel-view');
+                    loadAnchorGallery(currentChannelId);
+                }
                 loadGroupMessages(currentGroupId);
                 renderGroupTabs();
             }
@@ -2330,6 +2458,9 @@
             currentSearchQuery = '';
             currentGroupId = null;
             currentChannelId = null;
+            // Clear single channel view mode
+            document.body.classList.remove('single-channel-view');
+            loadAnchorGallery(null);
             // Reset search UI
             searchInput.classList.remove('expanded');
             searchInput.value = '';
@@ -2395,6 +2526,11 @@
                 showingSearch = false;
                 currentSearchQuery = '';
                 if (currentGroupId) {
+                    // Restore single channel view if a channel was selected
+                    if (currentChannelId) {
+                        document.body.classList.add('single-channel-view');
+                        loadAnchorGallery(currentChannelId);
+                    }
                     loadGroupMessages(currentGroupId);
                 } else if (showingBookmarks) {
                     loadBookmarks();
@@ -2414,6 +2550,9 @@
             currentSearchQuery = query;
             showingSearch = true;
             showingBookmarks = false;
+            // Clear single channel view mode during search
+            document.body.classList.remove('single-channel-view');
+            loadAnchorGallery(null);
             renderGroupTabs();
             updateUrl();
 
@@ -2555,6 +2694,14 @@
             currentSearchQuery = '';
             currentGroupId = groupId;
             currentChannelId = channelId;
+            // Manage single channel view mode
+            if (channelId) {
+                document.body.classList.add('single-channel-view');
+                loadAnchorGallery(channelId);
+            } else {
+                document.body.classList.remove('single-channel-view');
+                loadAnchorGallery(null);
+            }
             // Reset search UI
             searchInput.classList.remove('expanded');
             searchInput.value = '';
@@ -2582,6 +2729,7 @@
             showingBookmarks = false;
             currentGroupId = groupId;
             currentChannelId = channelId;
+            document.body.classList.add('single-channel-view');
             renderGroupTabs();
             renderChannels();
             // Close sidebar only if it's open
@@ -2590,10 +2738,14 @@
             }
             updateUrl();
             await loadGroupMessages(groupId);
+            // Load anchor gallery for this channel
+            loadAnchorGallery(channelId);
         }
 
         // Clear channel filter
         function clearChannelFilter() {
+            document.body.classList.remove('single-channel-view');
+            loadAnchorGallery(null);
             if (currentGroupId) {
                 selectGroup(currentGroupId, null);
             }
@@ -3027,6 +3179,20 @@
                         await updateBookmark(channelId, messageId, newBookmarked);
                         bookmark.classList.toggle('active', newBookmarked === 1);
                     });
+
+                    const anchor = actions.querySelector('.anchor');
+                    if (anchor) {
+                        anchor.addEventListener('click', async () => {
+                            const isActive = anchor.classList.contains('active');
+                            const newAnchored = isActive ? 0 : 1;
+                            await updateAnchor(channelId, messageId, newAnchored);
+                            anchor.classList.toggle('active', newAnchored === 1);
+                            // Refresh anchor gallery
+                            if (currentChannelId) {
+                                loadAnchorGallery(currentChannelId);
+                            }
+                        });
+                    }
                 }
 
                 // Channel name click handler
@@ -3292,9 +3458,11 @@
             // Determine current rating and bookmark state
             const rating = msg.rating || 0;
             const bookmarked = msg.bookmarked || 0;
+            const anchored = msg.anchored || 0;
             const thumbUpActive = rating === 1 ? 'active' : '';
             const thumbDownActive = rating === -1 ? 'active' : '';
             const bookmarkActive = bookmarked === 1 ? 'active' : '';
+            const anchorActive = anchored === 1 ? 'active' : '';
 
             // Check if this message is a duplicate
             const isDuplicate = msg.duplicate_of_channel && msg.duplicate_of_message;
@@ -3363,6 +3531,9 @@
                         <button class="action-btn thumb-down ${thumbDownActive}" title="Dislike">&#128078;</button>
                         <button class="action-btn bookmark ${bookmarkActive}" title="Bookmark">
                             <svg class="bookmark-icon ${bookmarkActive ? 'filled' : ''}" viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>
+                        </button>
+                        <button class="action-btn anchor ${anchorActive}" title="Anchor">
+                            <svg class="anchor-icon" viewBox="0 0 24 24"><circle cx="12" cy="5" r="3"></circle><line x1="12" y1="8" x2="12" y2="21"></line><path d="M5 12H2a10 10 0 0 0 20 0h-3"></path></svg>
                         </button>
                     </div>
                 </div>
@@ -3765,6 +3936,20 @@
                     await updateBookmark(channelId, messageId, newBookmarked);
                     bookmark.classList.toggle('active', newBookmarked === 1);
                 });
+
+                const anchor = actions.querySelector('.anchor');
+                if (anchor) {
+                    anchor.addEventListener('click', async () => {
+                        const isActive = anchor.classList.contains('active');
+                        const newAnchored = isActive ? 0 : 1;
+                        await updateAnchor(channelId, messageId, newAnchored);
+                        anchor.classList.toggle('active', newAnchored === 1);
+                        // Refresh anchor gallery
+                        if (currentChannelId) {
+                            loadAnchorGallery(currentChannelId);
+                        }
+                    });
+                }
             });
 
             // Channel name click handlers in message cards
@@ -3939,6 +4124,136 @@
                 });
             } catch (e) {
                 console.error('Failed to update bookmark:', e);
+            }
+        }
+
+        async function updateAnchor(channelId, messageId, anchored) {
+            try {
+                await fetch('/api/message/anchor', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ channel_id: channelId, message_id: messageId, anchored })
+                });
+            } catch (e) {
+                console.error('Failed to update anchor:', e);
+            }
+        }
+
+        // Anchor gallery for single channel view
+        const anchorGallery = document.getElementById('anchorGallery');
+        let currentAnchors = [];
+
+        async function loadAnchorGallery(channelId) {
+            if (!channelId) {
+                anchorGallery.classList.remove('has-anchors');
+                document.body.classList.remove('has-anchor-gallery');
+                return;
+            }
+
+            try {
+                const res = await fetch(`/api/channel/${channelId}/anchors`);
+                currentAnchors = await res.json();
+                renderAnchorGallery();
+            } catch (e) {
+                console.error('Failed to load anchors:', e);
+                currentAnchors = [];
+                renderAnchorGallery();
+            }
+        }
+
+        function renderAnchorGallery() {
+            if (!currentAnchors.length) {
+                anchorGallery.classList.remove('has-anchors');
+                document.body.classList.remove('has-anchor-gallery');
+                anchorGallery.innerHTML = '<div class="anchor-gallery-label">Anchors</div>';
+                return;
+            }
+
+            anchorGallery.classList.add('has-anchors');
+            document.body.classList.add('has-anchor-gallery');
+
+            let html = '<div class="anchor-gallery-label">Anchors</div>';
+            for (const anchor of currentAnchors) {
+                const thumbSrc = getAnchorThumbnail(anchor);
+                const preview = anchor.message ? anchor.message.substring(0, 30) : 'Message';
+
+                html += `<div class="anchor-thumb" data-channel-id="${currentChannelId}" data-message-id="${anchor.id}" data-date="${anchor.date}" title="${escapeHtml(preview)}">`;
+                if (thumbSrc) {
+                    html += `<img src="${thumbSrc}" alt="" loading="lazy">`;
+                } else {
+                    html += `<div class="anchor-thumb-placeholder">${escapeHtml(preview.substring(0, 20))}</div>`;
+                }
+                html += '</div>';
+            }
+
+            anchorGallery.innerHTML = html;
+
+            // Add click handlers
+            anchorGallery.querySelectorAll('.anchor-thumb').forEach(thumb => {
+                thumb.addEventListener('click', () => {
+                    const messageId = parseInt(thumb.dataset.messageId);
+                    const date = parseInt(thumb.dataset.date);
+                    jumpToAnchoredMessage(messageId, date);
+                });
+            });
+        }
+
+        function getAnchorThumbnail(anchor) {
+            // Try video thumbnail first
+            if (anchor.video_thumbnail_path) {
+                return `/media/${anchor.video_thumbnail_path}`;
+            }
+            // Then media path for images
+            if (anchor.media_path && anchor.media_type === 'photo') {
+                return `/media/${anchor.media_path}`;
+            }
+            // Check if document is actually an image
+            if (anchor.media_path && anchor.media_type === 'document') {
+                const ext = anchor.media_path.split('.').pop().toLowerCase();
+                if (['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext)) {
+                    return `/media/${anchor.media_path}`;
+                }
+            }
+            return null;
+        }
+
+        async function jumpToAnchoredMessage(messageId, messageDate) {
+            if (!currentChannelId) return;
+
+            // Load messages starting from around this date
+            mainContent.innerHTML = '<div class="placeholder"><p>Loading messages...</p></div>';
+
+            try {
+                // Get messages older than and including the target
+                const beforeDate = messageDate + 1; // Include the target message
+                const res = await fetch(`/api/group/${currentGroupId}/earlier?before=${beforeDate}&limit=50&channel=${currentChannelId}`);
+                messages = await res.json();
+
+                // Mark as viewing from a specific position
+                viewingFromOldest = true;
+                updateEarliestDate();
+                noMoreLaterMessages = false;
+
+                renderFeed();
+
+                // Scroll to the specific message after render
+                setTimeout(() => {
+                    const messageCard = document.querySelector(`.message-card[data-message-id="${messageId}"]`);
+                    if (messageCard) {
+                        const headerHeight = 56;
+                        const targetTop = messageCard.getBoundingClientRect().top + window.scrollY - headerHeight - 16;
+                        window.scrollTo({ top: targetTop, behavior: 'smooth' });
+
+                        // Highlight briefly
+                        messageCard.style.boxShadow = '0 0 0 3px #9C27B0';
+                        setTimeout(() => {
+                            messageCard.style.boxShadow = '';
+                        }, 2000);
+                    }
+                }, 100);
+            } catch (e) {
+                console.error('Failed to jump to anchored message:', e);
+                mainContent.innerHTML = '<div class="placeholder"><p>Failed to load messages</p></div>';
             }
         }
 

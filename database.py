@@ -57,6 +57,7 @@ class DatabaseMigration:
             ("read", "INTEGER DEFAULT 0"),
             ("rating", "INTEGER DEFAULT 0"),
             ("bookmarked", "INTEGER DEFAULT 0"),
+            ("anchored", "INTEGER DEFAULT 0"),
             ("html_downloaded", "INTEGER DEFAULT 0"),
             ("media_pending", "INTEGER DEFAULT 0"),
             ("read_in_tg", "INTEGER DEFAULT 0"),
@@ -76,6 +77,7 @@ class DatabaseMigration:
             # Add indexes for better query performance
             self._create_index_if_not_exists(cursor, table_name, "read_date", ["read", "date"])
             self._create_index_if_not_exists(cursor, table_name, "bookmarked", ["bookmarked"])
+            self._create_index_if_not_exists(cursor, table_name, "anchored", ["anchored"])
             self._create_index_if_not_exists(cursor, table_name, "content_hash", ["content_hash"])
             self._create_index_if_not_exists(cursor, table_name, "content_hash_pending", ["content_hash_pending"])
 
@@ -258,6 +260,7 @@ class Database:
                 read INTEGER DEFAULT 0,
                 rating INTEGER DEFAULT 0,
                 bookmarked INTEGER DEFAULT 0,
+                anchored INTEGER DEFAULT 0,
                 html_downloaded INTEGER DEFAULT 0,
                 media_pending INTEGER DEFAULT 0,
                 read_in_tg INTEGER DEFAULT 0,
@@ -855,6 +858,30 @@ class Database:
             cursor.execute(f"UPDATE {table_name} SET bookmarked = ? WHERE id = ?", (bookmarked, message_id))
         except sqlite3.Error:
             pass
+
+    def update_message_anchor(self, channel_id: int, message_id: int, anchored: int) -> None:
+        """Update message anchor status (0 or 1)."""
+        table_name = f"channel_{channel_id}"
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(f"UPDATE {table_name} SET anchored = ? WHERE id = ?", (anchored, message_id))
+        except sqlite3.Error:
+            pass
+
+    def get_anchored_messages(self, channel_id: int) -> list[dict]:
+        """Get all anchored messages for a channel, sorted by date."""
+        table_name = f"channel_{channel_id}"
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(f"""
+                SELECT id, date, message, media_type, media_path, video_thumbnail_path
+                FROM {table_name}
+                WHERE anchored = 1
+                ORDER BY date ASC
+            """)
+            return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error:
+            return []
 
     def get_all_bookmarked_messages(self, limit: int = 100) -> list[dict]:
         """Get all bookmarked messages from all channels, sorted by date descending."""

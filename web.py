@@ -436,6 +436,29 @@ def bookmark_message():
     return json.dumps({"success": True})
 
 
+@app.route("/api/message/anchor", method="POST")
+def anchor_message():
+    """Set message anchor status."""
+    response.content_type = "application/json"
+    data = request.json
+    channel_id = int(data.get("channel_id"))
+    message_id = int(data.get("message_id"))
+    anchored = int(data.get("anchored", 0))  # 0 or 1
+    with Database() as db:
+        db.update_message_anchor(channel_id, message_id, anchored)
+        db.commit()
+    return json.dumps({"success": True})
+
+
+@app.route("/api/channel/<channel_id:int>/anchors")
+def get_channel_anchors(channel_id):
+    """Get all anchored messages for a channel."""
+    response.content_type = "application/json"
+    with Database() as db:
+        anchors = db.get_anchored_messages(channel_id)
+        return json.dumps(anchors)
+
+
 @app.route("/api/message/<channel_id:int>/<message_id:int>")
 def get_message(channel_id, message_id):
     """Get a single message by channel and message ID."""
