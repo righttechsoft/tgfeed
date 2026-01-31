@@ -93,16 +93,14 @@ class DatabaseMigration:
     def _create_index_if_not_exists(self, cursor, table_name: str, index_suffix: str, columns: list[str]) -> None:
         """Create an index if it doesn't exist. Skips if any column doesn't exist."""
         index_name = f"idx_{table_name}_{index_suffix}"
-        cursor.execute(f"SELECT name FROM sqlite_master WHERE type='index' AND name=?", (index_name,))
-        if cursor.fetchone() is None:
-            # Check that all columns exist before creating index
-            cursor.execute(f"PRAGMA table_info({table_name})")
-            existing_cols = {row[1] for row in cursor.fetchall()}
-            for col in columns:
-                if col not in existing_cols:
-                    return  # Skip index creation if column doesn't exist
-            cols = ", ".join(columns)
-            cursor.execute(f"CREATE INDEX {index_name} ON {table_name} ({cols})")
+        # Check that all columns exist before creating index
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+        for col in columns:
+            if col not in existing_cols:
+                return  # Skip index creation if column doesn't exist
+        cols = ", ".join(columns)
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name} ({cols})")
 
     def _create_content_hashes_table(self, cursor) -> None:
         """Create the content_hashes lookup table if it doesn't exist."""

@@ -1583,7 +1583,7 @@
             padding: 8px;
         }
 
-        .single-channel-view .anchor-gallery.has-anchors {
+        .single-channel-view .anchor-gallery {
             display: flex;
         }
 
@@ -4164,8 +4164,8 @@
         function renderAnchorGallery() {
             if (!currentAnchors.length) {
                 anchorGallery.classList.remove('has-anchors');
-                document.body.classList.remove('has-anchor-gallery');
-                anchorGallery.innerHTML = '<div class="anchor-gallery-label">Anchors</div>';
+                document.body.classList.add('has-anchor-gallery');
+                anchorGallery.innerHTML = '<div class="anchor-gallery-label">Anchors</div><div class="anchor-thumb-placeholder" style="height:auto;padding:8px;">Click ⚓ on messages to add anchors</div>';
                 return;
             }
 
