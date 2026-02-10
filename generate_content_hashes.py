@@ -1,121 +1,268 @@
-"""Generate semantic content hashes for message deduplication using Claude API.
+"""Generate semantic content hashes for message deduplication.
+
+Also generates media hashes for attachment-based deduplication.
 
 Processes messages to create normalized summaries, then hashes them for
 cross-channel duplicate detection.
+
+Supports multiple AI providers (Mistral, Cerebras) via the ai_providers module.
 """
 
 import hashlib
 import logging
 import sys
 import time
-
-import requests
+from pathlib import Path
 
 from config import (
-    ANTHROPIC_API_KEY,
-    CLAUDE_MODEL,
+    MISTRAL_API_KEY,
+    MISTRAL_MODEL,
+    CEREBRAS_API_KEY,
+    CEREBRAS_MODEL,
+    AI_PROVIDER,
     DEDUP_MESSAGES_PER_RUN,
     DEDUP_MIN_MESSAGE_LENGTH,
+    MEDIA_DIR,
     validate_config,
 )
 from database import Database, DatabaseMigration
+from ai_providers import AIProvider, MistralProvider, CerebrasProvider
 
-# Configure logging
+# Configure logging with UTF-8 encoding for Windows
+import io
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
+    handlers=[logging.StreamHandler(io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace'))],
 )
 logger = logging.getLogger(__name__)
 
 # Rate limiting
-API_DELAY_SECONDS = 1.0  # Delay between API calls
+API_DELAY_SECONDS = 0.5  # Delay between API calls
 
 
-# System prompt for Claude
-SYSTEM_PROMPT = """Create a short headline for this post in a short sentence. Focus on:
-- What is the core topic or news?
-- What are the key facts, names, numbers, or events?
-- Ignore greetings, calls to action, formatting, and promotional language.
+def get_ai_provider() -> AIProvider | None:
+    """Get the configured AI provider.
 
-ALWAYS USE STRUCTURE: Who, When, What, How.
+    Returns the provider based on AI_PROVIDER setting:
+    - "mistral": Use Mistral API
+    - "cerebras": Use Cerebras API
+    - "auto": Use first available (Mistral, then Cerebras)
 
-Output ONLY the summary, nothing else. Maximum 100 words. Always use English, regardless of the post language!
-
-If the post is clearly an advertising, respond with just a single word `advertising`"""
-
-
-def call_claude_api(message_text: str) -> str | None:
-    """Call Claude API to generate a summary of the message.
-
-    Returns the summary, or None on error.
+    Returns None if no provider is configured.
     """
-    if not ANTHROPIC_API_KEY:
-        logger.error("ANTHROPIC_API_KEY not configured")
-        return None
-
-    url = "https://api.anthropic.com/v1/messages"
-
-    headers = {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json"
+    providers = {
+        "mistral": lambda: MistralProvider(MISTRAL_API_KEY, MISTRAL_MODEL),
+        "cerebras": lambda: CerebrasProvider(CEREBRAS_API_KEY, CEREBRAS_MODEL),
     }
 
-    payload = {
-        "model": CLAUDE_MODEL,
-        "max_tokens": 150,
-        "system": SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": message_text}],
-    }
+    if AI_PROVIDER.lower() in providers:
+        provider = providers[AI_PROVIDER.lower()]()
+        if provider.is_configured():
+            return provider
+        logger.warning(f"AI provider '{AI_PROVIDER}' selected but not configured")
+        return None
 
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
-        response.raise_for_status()
-        result = response.json()
-        return result["content"][0]["text"].strip()
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Claude API error: {e}")
+    # Auto mode: try providers in order
+    if AI_PROVIDER.lower() == "auto":
+        for name, create_provider in providers.items():
+            provider = create_provider()
+            if provider.is_configured():
+                logger.info(f"Using AI provider: {provider.name}")
+                return provider
         return None
-    except (KeyError, IndexError) as e:
-        logger.error(f"Unexpected API response format: {e}")
-        return None
+
+    logger.warning(f"Unknown AI provider: {AI_PROVIDER}")
+    return None
+
+
+def normalize_keywords(keywords_str: str) -> str:
+    """Normalize and sort keywords for consistent hashing."""
+    # Split by comma, strip whitespace, lowercase, remove empty
+    keywords = [k.strip().lower() for k in keywords_str.split(',') if k.strip()]
+    # Remove duplicates and sort
+    keywords = sorted(set(keywords))
+    # Join back
+    return ','.join(keywords)
 
 
 def compute_hash(normalized_text: str) -> str:
-    """Generate SHA256 hash from normalized text."""
-    # Lowercase and strip for consistency
-    clean_text = normalized_text.strip().lower()
+    """Generate SHA256 hash from normalized keywords."""
+    clean_text = normalize_keywords(normalized_text)
     return hashlib.sha256(clean_text.encode('utf-8')).hexdigest()
 
 
-def generate_content_hashes() -> None:
-    """Main function to generate content hashes for deduplication."""
-    logger.info("Starting content hash generation...")
+def sha256_file(file_path: Path) -> str | None:
+    """Compute SHA256 hash of a file's contents."""
+    try:
+        hasher = hashlib.sha256()
+        with open(file_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(65536), b''):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except (OSError, IOError) as e:
+        logger.warning(f"Failed to hash file {file_path}: {e}")
+        return None
 
-    validate_config()
 
-    if not ANTHROPIC_API_KEY:
-        logger.error("ANTHROPIC_API_KEY not set in .env - cannot proceed")
-        sys.exit(1)
+def generate_media_hashes() -> tuple[int, int, int]:
+    """Generate media hashes for attachment-based deduplication.
 
-    # Run migrations to ensure columns exist
-    DatabaseMigration().migrate()
+    For albums (grouped_id), all media files are combined into a single hash.
 
-    # Get active channels
+    Returns:
+        Tuple of (processed_count, duplicates_found, skipped_count)
+    """
+    logger.info("Starting media hash generation...")
+
+    # Get channels with dedup enabled
     with Database() as db:
-        channels = [dict(row) for row in db.get_active_channels()]
+        channels = [dict(row) for row in db.get_dedup_channels()]
 
     if not channels:
-        logger.info("No active channels found")
-        return
+        logger.info("No channels with dedup enabled")
+        return (0, 0, 0)
 
-    logger.info(f"Found {len(channels)} active channels")
+    total_processed = 0
+    total_duplicates = 0
+    total_skipped = 0
+
+    # Track processed grouped_ids to avoid duplicate processing within a run
+    processed_albums: set[tuple[int, int]] = set()  # (channel_id, grouped_id)
+
+    for channel in channels:
+        channel_id = channel["id"]
+        channel_title = channel["title"]
+
+        # First, skip messages without media
+        with Database() as db:
+            no_media_ids = db.get_messages_without_media_for_skip(channel_id, limit=500)
+            if no_media_ids:
+                for msg_id in no_media_ids:
+                    db.skip_media_hash(channel_id, msg_id)
+                db.commit()
+                total_skipped += len(no_media_ids)
+
+        # Get messages needing media hashes
+        with Database() as db:
+            messages = db.get_messages_needing_media_hashes(
+                channel_id, limit=DEDUP_MESSAGES_PER_RUN
+            )
+
+        if not messages:
+            continue
+
+        logger.info(f"Processing {len(messages)} media messages from: {channel_title}")
+
+        for msg in messages:
+            grouped_id = msg.get("grouped_id")
+
+            # For albums, skip if we already processed this group in this run
+            if grouped_id:
+                album_key = (channel_id, grouped_id)
+                if album_key in processed_albums:
+                    continue
+                processed_albums.add(album_key)
+
+            # Collect media paths
+            if grouped_id:
+                # Album: get ALL messages in this group
+                with Database() as db:
+                    album_msgs = db.get_album_messages(channel_id, grouped_id)
+                media_paths = sorted([
+                    m["media_path"] for m in album_msgs
+                    if m.get("media_path")
+                ])
+                album_msg_ids = [m["id"] for m in album_msgs]
+                msg_date = album_msgs[0]["date"] if album_msgs else msg["date"]
+            else:
+                # Single message
+                media_paths = [msg["media_path"]] if msg.get("media_path") else []
+                album_msg_ids = [msg["id"]]
+                msg_date = msg["date"]
+
+            if not media_paths:
+                # No media to hash
+                with Database() as db:
+                    for msg_id in album_msg_ids:
+                        db.skip_media_hash(channel_id, msg_id)
+                    db.commit()
+                total_skipped += len(album_msg_ids)
+                continue
+
+            # Hash each file
+            file_hashes = []
+            all_files_exist = True
+            for rel_path in media_paths:
+                full_path = MEDIA_DIR / rel_path
+                if full_path.exists():
+                    file_hash = sha256_file(full_path)
+                    if file_hash:
+                        file_hashes.append(file_hash)
+                    else:
+                        all_files_exist = False
+                        break
+                else:
+                    all_files_exist = False
+                    break
+
+            if not file_hashes or not all_files_exist:
+                # Can't hash - skip for now (maybe files not downloaded yet)
+                continue
+
+            # Combine hashes (sorted paths ensure consistent order)
+            combined = ''.join(file_hashes)
+            media_hash = hashlib.sha256(combined.encode('utf-8')).hexdigest()
+
+            # Check for duplicate and register
+            with Database() as db:
+                original = db.register_media_hash(
+                    media_hash, channel_id, album_msg_ids[0], msg_date
+                )
+
+                if original:
+                    # This is a duplicate - mark ALL album messages
+                    for msg_id in album_msg_ids:
+                        db.mark_as_duplicate(channel_id, msg_id, original[0], original[1])
+                        db.update_media_hash(channel_id, msg_id, media_hash)
+                    total_duplicates += 1
+                    logger.info(f"  Duplicate (media): msgs {album_msg_ids} -> channel {original[0]} msg {original[1]}")
+                else:
+                    # First occurrence - update all album messages
+                    for msg_id in album_msg_ids:
+                        db.update_media_hash(channel_id, msg_id, media_hash)
+
+                db.commit()
+
+            total_processed += 1
+
+    return (total_processed, total_duplicates, total_skipped)
+
+
+def generate_text_hashes(ai_provider: AIProvider) -> tuple[int, int, int, int]:
+    """Generate AI-based content hashes for text deduplication.
+
+    Skips messages already marked as duplicates (e.g., from media hashing).
+
+    Returns:
+        Tuple of (processed_count, duplicates_found, skipped_count, error_count)
+    """
+    logger.info(f"Starting text hash generation using {ai_provider.name}...")
 
     total_processed = 0
     total_duplicates = 0
     total_skipped = 0
     total_errors = 0
+
+    # Get channels with dedup enabled
+    with Database() as db:
+        channels = [dict(row) for row in db.get_dedup_channels()]
+
+    if not channels:
+        logger.info("No channels with dedup enabled")
+        return (0, 0, 0, 0)
+
+    logger.info(f"Found {len(channels)} active channels for text deduplication")
 
     for channel in channels:
         channel_id = channel["id"]
@@ -145,17 +292,45 @@ def generate_content_hashes() -> None:
         logger.info(f"Processing {len(messages)} messages from: {channel_title}")
 
         for msg in messages:
+            # Check if already marked as duplicate (e.g., from media hashing)
+            with Database() as db:
+                full_msg = db.get_message(channel_id, msg["id"])
+                if full_msg and full_msg.get("duplicate_of_channel"):
+                    # Already a duplicate, skip AI processing but mark content hash as done
+                    db.skip_content_hash(channel_id, msg["id"])
+                    db.commit()
+                    total_skipped += 1
+                    continue
+
             message_text = msg["message"]
 
             # Rate limit
             time.sleep(API_DELAY_SECONDS)
 
-            # Generate AI summary via Claude
-            ai_summary = call_claude_api(message_text)
+            # Generate AI summary via provider
+            ai_summary = ai_provider.generate_summary(message_text)
 
             if not ai_summary:
                 logger.warning(f"  Failed to get summary for message {msg['id']}")
                 total_errors += 1
+                continue
+
+            # Treat very short output (less than 3 tokens) as empty
+            tokens = [t for t in ai_summary.strip().split(',') if t.strip()]
+            if len(tokens) < 3:
+                logger.info(f"  Skipping message {msg['id']}: AI returned too few tokens ({len(tokens)}): {ai_summary.strip()}")
+                with Database() as db:
+                    db.skip_content_hash(channel_id, msg["id"])
+                    db.commit()
+                total_skipped += 1
+                continue
+
+            # Skip promotional content
+            if ai_summary.strip().lower() == "ad":
+                with Database() as db:
+                    db.skip_content_hash(channel_id, msg["id"])
+                    db.commit()
+                total_skipped += 1
                 continue
 
             # Compute hash from the AI summary
@@ -182,15 +357,52 @@ def generate_content_hashes() -> None:
 
             total_processed += 1
 
+    return (total_processed, total_duplicates, total_skipped, total_errors)
+
+
+def generate_content_hashes() -> None:
+    """Main function to generate content hashes for deduplication.
+
+    Order of processing:
+    1. Media hashes (fast, no API calls)
+    2. Text hashes via AI (slower, requires API)
+
+    Messages already marked as duplicates from media hashing are skipped
+    for text hashing to save API calls.
+    """
+    logger.info("Starting deduplication hash generation...")
+
+    validate_config()
+
+    # Run migrations to ensure columns exist
+    DatabaseMigration().migrate()
+
+    # Step 1: Media hashing (fast, no API needed)
+    media_processed, media_duplicates, media_skipped = generate_media_hashes()
+
     logger.info("=" * 50)
-    logger.info("Content hash generation completed!")
-    logger.info(f"  Processed: {total_processed}")
-    logger.info(f"  Duplicates found: {total_duplicates}")
-    logger.info(f"  Skipped (short): {total_skipped}")
-    logger.info(f"  Errors: {total_errors}")
+    logger.info("Media hash generation completed!")
+    logger.info(f"  Processed: {media_processed}")
+    logger.info(f"  Duplicates found (media): {media_duplicates}")
+    logger.info(f"  Skipped (no media): {media_skipped}")
+    logger.info("=" * 50)
+
+    # Step 2: Text hashing via AI (slower, requires API)
+    ai_provider = get_ai_provider()
+    if not ai_provider:
+        logger.warning("No AI provider configured - skipping text-based deduplication")
+        return
+
+    text_processed, text_duplicates, text_skipped, text_errors = generate_text_hashes(ai_provider)
+
+    logger.info("=" * 50)
+    logger.info("Text hash generation completed!")
+    logger.info(f"  Processed: {text_processed}")
+    logger.info(f"  Duplicates found (text): {text_duplicates}")
+    logger.info(f"  Skipped (short/promo/already dup): {text_skipped}")
+    logger.info(f"  Errors: {text_errors}")
     logger.info("=" * 50)
 
 
 if __name__ == "__main__":
-    return
-    #generate_content_hashes()
+    generate_content_hashes()

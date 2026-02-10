@@ -29,9 +29,20 @@ TG_DAEMON_PORT = int(os.getenv("TG_DAEMON_PORT", "9876"))
 WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
 WEB_PORT = int(os.getenv("WEB_PORT", "8910"))
 
-# Claude API (for content deduplication)
+# Claude API (for content deduplication) - deprecated, use Mistral
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-5-haiku-20241022")
+
+# Mistral API (for content deduplication)
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
+
+# Cerebras API (for content deduplication)
+CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
+CEREBRAS_MODEL = os.getenv("CEREBRAS_MODEL", "llama-3.3-70b")
+
+# AI provider selection: "mistral", "cerebras", or "auto" (first available)
+AI_PROVIDER = os.getenv("AI_PROVIDER", "cerebras")
 
 # Deduplication settings
 DEDUP_MIN_MESSAGE_LENGTH = int(os.getenv("DEDUP_MIN_MESSAGE_LENGTH", "50"))

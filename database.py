@@ -32,6 +32,8 @@ class DatabaseMigration:
             self._add_column(cursor, "channels", "download_videos", "INTEGER DEFAULT 1")
             self._add_column(cursor, "channels", "download_audio", "INTEGER DEFAULT 1")
             self._add_column(cursor, "channels", "download_other", "INTEGER DEFAULT 1")
+            # Deduplication flag on groups - only process channels in groups with dedup=1
+            self._add_column(cursor, "groups", "dedup", "INTEGER DEFAULT 0")
             self._migrate_channel_tables(cursor)
             conn.commit()
             logger.info("Database migrations completed")
@@ -55,9 +57,11 @@ class DatabaseMigration:
             ("media_path", "TEXT"),
             ("entities", "TEXT"),
             ("read", "INTEGER DEFAULT 0"),
+            ("read_at", "INTEGER"),  # Timestamp when message was marked as read
             ("rating", "INTEGER DEFAULT 0"),
             ("bookmarked", "INTEGER DEFAULT 0"),
             ("anchored", "INTEGER DEFAULT 0"),
+            ("hidden", "INTEGER DEFAULT 0"),
             ("html_downloaded", "INTEGER DEFAULT 0"),
             ("media_pending", "INTEGER DEFAULT 0"),
             ("read_in_tg", "INTEGER DEFAULT 0"),
@@ -68,6 +72,9 @@ class DatabaseMigration:
             ("content_hash_pending", "INTEGER DEFAULT 1"),
             ("duplicate_of_channel", "INTEGER"),
             ("duplicate_of_message", "INTEGER"),
+            # Media deduplication columns
+            ("media_hash", "TEXT"),
+            ("media_hash_pending", "INTEGER DEFAULT 1"),
         ]
 
         for table_name in tables:
@@ -78,11 +85,17 @@ class DatabaseMigration:
             self._create_index_if_not_exists(cursor, table_name, "read_date", ["read", "date"])
             self._create_index_if_not_exists(cursor, table_name, "bookmarked", ["bookmarked"])
             self._create_index_if_not_exists(cursor, table_name, "anchored", ["anchored"])
+            self._create_index_if_not_exists(cursor, table_name, "hidden", ["hidden"])
             self._create_index_if_not_exists(cursor, table_name, "content_hash", ["content_hash"])
             self._create_index_if_not_exists(cursor, table_name, "content_hash_pending", ["content_hash_pending"])
+            self._create_index_if_not_exists(cursor, table_name, "media_hash", ["media_hash"])
+            self._create_index_if_not_exists(cursor, table_name, "media_hash_pending", ["media_hash_pending"])
 
         # Create content_hashes lookup table for cross-channel deduplication
         self._create_content_hashes_table(cursor)
+
+        # Create media_hashes lookup table for media deduplication
+        self._create_media_hashes_table(cursor)
 
         # Create tg_creds table for Telegram daemon
         self._create_tg_creds_table(cursor)
@@ -114,6 +127,19 @@ class DatabaseMigration:
             )
         """)
         self._create_index_if_not_exists(cursor, "content_hashes", "date", ["message_date"])
+
+    def _create_media_hashes_table(self, cursor) -> None:
+        """Create the media_hashes lookup table if it doesn't exist."""
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS media_hashes (
+                hash TEXT PRIMARY KEY,
+                channel_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                message_date INTEGER,
+                created_at INTEGER NOT NULL
+            )
+        """)
+        self._create_index_if_not_exists(cursor, "media_hashes", "date", ["message_date"])
 
     def _create_channels_table(self, cursor) -> None:
         """Create the channels table if it doesn't exist."""
@@ -224,8 +250,23 @@ class Database:
     def get_active_channels(self) -> list[sqlite3.Row]:
         """Get all channels marked as active for message downloading."""
         cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM channels WHERE subscribed = 1 AND active = 1")
+        cursor.execute("SELECT * FROM channels WHERE active = 1")
         return cursor.fetchall()
+
+    def get_dedup_channels(self) -> list[sqlite3.Row]:
+        """Get all channels in groups with deduplication enabled."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT c.* FROM channels c
+            JOIN groups g ON c.group_id = g.id
+            WHERE c.active = 1 AND g.dedup = 1
+        """)
+        return cursor.fetchall()
+
+    def set_group_dedup(self, group_id: int, dedup: int) -> None:
+        """Set the dedup flag for a group (0 or 1)."""
+        cursor = self.conn.cursor()
+        cursor.execute("UPDATE groups SET dedup = ? WHERE id = ?", (dedup, group_id))
 
     def create_channel_messages_table(self, channel_id: int) -> None:
         """Create a messages table for a specific channel if it doesn't exist."""
@@ -256,9 +297,11 @@ class Database:
                 grouped_id INTEGER,
                 created_at INTEGER,
                 read INTEGER DEFAULT 0,
+                read_at INTEGER,
                 rating INTEGER DEFAULT 0,
                 bookmarked INTEGER DEFAULT 0,
                 anchored INTEGER DEFAULT 0,
+                hidden INTEGER DEFAULT 0,
                 html_downloaded INTEGER DEFAULT 0,
                 media_pending INTEGER DEFAULT 0,
                 read_in_tg INTEGER DEFAULT 0,
@@ -267,7 +310,9 @@ class Database:
                 content_hash TEXT,
                 content_hash_pending INTEGER DEFAULT 1,
                 duplicate_of_channel INTEGER,
-                duplicate_of_message INTEGER
+                duplicate_of_message INTEGER,
+                media_hash TEXT,
+                media_hash_pending INTEGER DEFAULT 1
             )
         """)
 
@@ -462,13 +507,12 @@ class Database:
     # Web UI methods
 
     def get_all_channels_with_groups(self) -> list[sqlite3.Row]:
-        """Get all subscribed channels with their group info."""
+        """Get all channels with their group info."""
         cursor = self.conn.cursor()
         cursor.execute("""
             SELECT c.*, g.name as group_name
             FROM channels c
             LEFT JOIN groups g ON c.group_id = g.id
-            WHERE c.subscribed = 1
             ORDER BY g.name, c.title
         """)
         return cursor.fetchall()
@@ -500,7 +544,7 @@ class Database:
         """Get the number of channels in a group."""
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT COUNT(*) FROM channels WHERE group_id = ? AND subscribed = 1",
+            "SELECT COUNT(*) FROM channels WHERE group_id = ?",
             (group_id,)
         )
         return cursor.fetchone()[0]
@@ -593,23 +637,26 @@ class Database:
     def get_download_all_channels(self) -> list[sqlite3.Row]:
         """Get all channels with download_all enabled."""
         cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM channels WHERE active=1 AND subscribed = 1 AND download_all = 1")
+        cursor.execute("SELECT * FROM channels WHERE active = 1 AND download_all = 1")
         return cursor.fetchall()
 
     def get_channels_by_group(self, group_id: int) -> list[sqlite3.Row]:
         """Get all channels in a group."""
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT * FROM channels WHERE group_id = ? AND subscribed = 1",
+            "SELECT * FROM channels WHERE group_id = ?",
             (group_id,)
         )
         return cursor.fetchall()
 
     def get_unread_messages_by_group(self, group_id: int, limit: int = 100, channel_id: int | None = None) -> list[dict]:
-        """Get unread messages from all channels in a group, sorted by date."""
+        """Get unread messages from all active channels in a group, sorted by date."""
         channels = self.get_channels_by_group(group_id)
         if not channels:
             return []
+
+        # Filter to only active channels
+        channels = [c for c in channels if c["active"] == 1]
 
         if channel_id is not None:
             channels = [c for c in channels if c["id"] == channel_id]
@@ -625,8 +672,9 @@ class Database:
                 cursor.execute(f"""
                     SELECT *, ? as channel_id, ? as channel_title, ? as channel_username
                     FROM {table_name}
-                    WHERE read = 0 OR read IS NULL
-                    ORDER BY date DESC
+                    WHERE (read = 0 OR read IS NULL)
+                      AND (hidden = 0 OR hidden IS NULL)
+                    ORDER BY date ASC
                     LIMIT ?
                 """, (ch_id, channel["title"], channel["username"], limit * 3))
                 for row in cursor.fetchall():
@@ -634,13 +682,16 @@ class Database:
             except sqlite3.Error:
                 pass
 
-        return self._group_album_messages(raw_messages, limit)
+        return self._group_album_messages(raw_messages, limit, oldest_first=True)
 
     def get_earlier_messages_by_group(self, group_id: int, before_date: int, limit: int = 50, channel_id: int | None = None) -> list[dict]:
-        """Get earlier (read) messages from all channels in a group, older than before_date."""
+        """Get earlier (read) messages from all active channels in a group, older than before_date."""
         channels = self.get_channels_by_group(group_id)
         if not channels:
             return []
+
+        # Filter to only active channels
+        channels = [c for c in channels if c["active"] == 1]
 
         if channel_id is not None:
             channels = [c for c in channels if c["id"] == channel_id]
@@ -657,6 +708,7 @@ class Database:
                     SELECT *, ? as channel_id, ? as channel_title, ? as channel_username
                     FROM {table_name}
                     WHERE date < ?
+                      AND (hidden = 0 OR hidden IS NULL)
                     ORDER BY date DESC
                     LIMIT ?
                 """, (ch_id, channel["title"], channel["username"], before_date, limit * 3))
@@ -683,6 +735,7 @@ class Database:
             cursor.execute(f"""
                 SELECT *, ? as channel_id, ? as channel_title, ? as channel_username
                 FROM {table_name}
+                WHERE hidden = 0 OR hidden IS NULL
                 ORDER BY date ASC
                 LIMIT ?
             """, (channel_id, channel_title, channel_username, limit * 3))
@@ -710,6 +763,7 @@ class Database:
                 SELECT *, ? as channel_id, ? as channel_title, ? as channel_username
                 FROM {table_name}
                 WHERE date > ?
+                  AND (hidden = 0 OR hidden IS NULL)
                 ORDER BY date ASC
                 LIMIT ?
             """, (channel_id, channel_title, channel_username, after_date, limit * 3))
@@ -720,29 +774,32 @@ class Database:
 
         return self._group_album_messages(raw_messages, limit, reverse=False)
 
-    def _group_album_messages(self, raw_messages: list[dict], limit: int, reverse: bool = False) -> list[dict]:
-        """Group messages by grouped_id into albums.
+    def _group_album_messages(self, raw_messages: list[dict], limit: int, reverse: bool = False, oldest_first: bool = False) -> list[dict]:
+        """Group messages by (channel_id, grouped_id) into albums.
 
         Args:
             raw_messages: List of message dicts to group
             limit: Maximum number of messages to return
             reverse: If True, return newest first (for bookmarks). Default False (oldest first, for feeds).
+            oldest_first: If True, keep oldest messages when limiting (for unread). Default False (keep newest).
         """
-        grouped = {}
+        grouped = {}  # key: (channel_id, grouped_id)
         ungrouped = []
 
         for msg in raw_messages:
             gid = msg.get("grouped_id")
-            if gid:
-                if gid not in grouped:
-                    grouped[gid] = []
-                grouped[gid].append(msg)
+            ch_id = msg.get("channel_id")
+            if gid and ch_id:
+                key = (ch_id, gid)
+                if key not in grouped:
+                    grouped[key] = []
+                grouped[key].append(msg)
             else:
                 ungrouped.append(msg)
 
         combined_messages = []
 
-        for gid, group_msgs in grouped.items():
+        for (ch_id, gid), group_msgs in grouped.items():
             group_msgs.sort(key=lambda m: m.get("id") or 0)
             base = group_msgs[0].copy()
 
@@ -783,12 +840,19 @@ class Database:
             msg["album_message_ids"] = [msg["id"]]
             combined_messages.append(msg)
 
-        combined_messages.sort(key=lambda m: m.get("date") or 0, reverse=True)
-        result = combined_messages[:limit]
-        if not reverse:
-            # Default: oldest first (for scrolling feeds)
-            result.sort(key=lambda m: m.get("date") or 0)
-        # If reverse=True, keep newest first (for bookmarks)
+        if oldest_first:
+            # For unread: sort ASC to keep oldest messages when limiting
+            combined_messages.sort(key=lambda m: m.get("date") or 0)
+            result = combined_messages[:limit]
+            # Already sorted oldest first for display
+        else:
+            # Default: sort DESC to keep newest messages when limiting
+            combined_messages.sort(key=lambda m: m.get("date") or 0, reverse=True)
+            result = combined_messages[:limit]
+            if not reverse:
+                # Re-sort oldest first for display (scrolling feeds)
+                result.sort(key=lambda m: m.get("date") or 0)
+            # If reverse=True, keep newest first (for bookmarks)
         return result
 
     def mark_message_read(self, channel_id: int, message_id: int) -> None:
@@ -811,7 +875,49 @@ class Database:
                 return dict(row)
         except sqlite3.Error:
             pass
-        return None
+
+    def get_message_duplicates(self, channel_id: int, message_id: int) -> list[dict]:
+        """Get all messages that are duplicates of the given message.
+
+        Searches all channel tables for messages where duplicate_of_channel/message
+        points to this message. Also includes this message's duplicate_of target if any.
+
+        Returns list of dicts with channel_id, message_id, channel_title, and full message data.
+        """
+        cursor = self.conn.cursor()
+
+        # Get all channel tables
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'channel_%'")
+        tables = [row[0] for row in cursor.fetchall() if not row[0].startswith("channel_backup_hash_")]
+
+        # Get channel info
+        cursor.execute("SELECT id, title, username FROM channels")
+        channel_info = {row[0]: {"title": row[1], "username": row[2]} for row in cursor.fetchall()}
+
+        duplicates = []
+
+        for table_name in tables:
+            try:
+                ch_id = int(table_name.replace("channel_", ""))
+                info = channel_info.get(ch_id, {"title": "Unknown", "username": None})
+
+                # Find messages pointing to the given message as their original
+                cursor.execute(f"""
+                    SELECT * FROM {table_name}
+                    WHERE duplicate_of_channel = ? AND duplicate_of_message = ?
+                      AND (hidden = 0 OR hidden IS NULL)
+                """, (channel_id, message_id))
+
+                for row in cursor.fetchall():
+                    msg = dict(row)
+                    msg["channel_id"] = ch_id
+                    msg["channel_title"] = info["title"]
+                    msg["channel_username"] = info["username"]
+                    duplicates.append(msg)
+            except (sqlite3.Error, ValueError):
+                pass
+
+        return duplicates
 
     def mark_messages_read(self, messages: list[tuple[int, int]]) -> None:
         """Mark multiple messages as read. Each tuple is (channel_id, message_id)."""
@@ -826,13 +932,18 @@ class Database:
 
         logger.info(f"[mark_messages_read] {len(messages)} messages across {len(by_channel)} channels")
 
+        now = int(time.time())
         cursor = self.conn.cursor()
         for channel_id, message_ids in by_channel.items():
             table_name = f"channel_{channel_id}"
             try:
                 start = time.time()
                 placeholders = ",".join("?" * len(message_ids))
-                cursor.execute(f"UPDATE {table_name} SET read = 1 WHERE id IN ({placeholders})", message_ids)
+                # Set read=1 and read_at timestamp only if not already read
+                cursor.execute(
+                    f"UPDATE {table_name} SET read = 1, read_at = ? WHERE id IN ({placeholders}) AND read = 0",
+                    (now, *message_ids)
+                )
                 elapsed = time.time() - start
                 if elapsed > 0.1:
                     logger.info(f"[mark_messages_read] {table_name}: {len(message_ids)} msgs in {elapsed:.3f}s")
@@ -866,6 +977,15 @@ class Database:
         except sqlite3.Error:
             pass
 
+    def update_message_hidden(self, channel_id: int, message_id: int, hidden: int) -> None:
+        """Update message hidden status (0 or 1)."""
+        table_name = f"channel_{channel_id}"
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(f"UPDATE {table_name} SET hidden = ? WHERE id = ?", (hidden, message_id))
+        except sqlite3.Error:
+            pass
+
     def get_anchored_messages(self, channel_id: int) -> list[dict]:
         """Get all anchored messages for a channel, sorted by date."""
         table_name = f"channel_{channel_id}"
@@ -875,6 +995,7 @@ class Database:
                 SELECT id, date, message, media_type, media_path, video_thumbnail_path
                 FROM {table_name}
                 WHERE anchored = 1
+                  AND (hidden = 0 OR hidden IS NULL)
                 ORDER BY date ASC
             """)
             return [dict(row) for row in cursor.fetchall()]
@@ -899,6 +1020,7 @@ class Database:
                     SELECT *, ? as channel_id, ? as channel_title, ? as channel_username
                     FROM {table_name}
                     WHERE bookmarked = 1
+                      AND (hidden = 0 OR hidden IS NULL)
                     ORDER BY date DESC
                     LIMIT ?
                 """, (channel_id, info["title"], info["username"], limit * 3))
@@ -910,15 +1032,15 @@ class Database:
         return self._group_album_messages(raw_messages, limit, reverse=True)
 
     def get_channel_stats(self, channel_id: int) -> dict:
-        """Get message statistics for a channel."""
+        """Get message statistics for a channel (excludes hidden messages)."""
         table_name = f"channel_{channel_id}"
         cursor = self.conn.cursor()
         try:
             cursor.execute(f"""
                 SELECT
                     COUNT(*) as total,
-                    SUM(CASE WHEN read = 0 OR read IS NULL THEN 1 ELSE 0 END) as unread,
-                    SUM(CASE WHEN bookmarked = 1 THEN 1 ELSE 0 END) as bookmarked,
+                    SUM(CASE WHEN (read = 0 OR read IS NULL) AND (hidden = 0 OR hidden IS NULL) THEN 1 ELSE 0 END) as unread,
+                    SUM(CASE WHEN bookmarked = 1 AND (hidden = 0 OR hidden IS NULL) THEN 1 ELSE 0 END) as bookmarked,
                     SUM(CASE WHEN rating = 1 THEN 1 ELSE 0 END) as likes,
                     SUM(CASE WHEN rating = -1 THEN 1 ELSE 0 END) as dislikes
                 FROM {table_name}
@@ -981,7 +1103,7 @@ class Database:
     # Content deduplication methods
 
     def get_messages_needing_hashes(self, channel_id: int, limit: int = 100, min_length: int = 50) -> list[dict]:
-        """Get messages that need content hash generation."""
+        """Get unread messages that need content hash generation."""
         table_name = f"channel_{channel_id}"
         cursor = self.conn.cursor()
         try:
@@ -989,6 +1111,7 @@ class Database:
                 SELECT id, message, media_type, date
                 FROM {table_name}
                 WHERE (content_hash_pending = 1 OR content_hash_pending IS NULL)
+                  AND (read = 0 OR read IS NULL)
                   AND message IS NOT NULL
                   AND length(message) >= ?
                 ORDER BY date DESC
@@ -1049,16 +1172,110 @@ class Database:
         return None
 
     def get_short_messages_for_skip(self, channel_id: int, limit: int = 500, min_length: int = 50) -> list[int]:
-        """Get message IDs that are too short for hashing and should be skipped."""
+        """Get unread message IDs that are too short for hashing and should be skipped."""
         table_name = f"channel_{channel_id}"
         cursor = self.conn.cursor()
         try:
             cursor.execute(f"""
                 SELECT id FROM {table_name}
                 WHERE (content_hash_pending = 1 OR content_hash_pending IS NULL)
+                  AND (read = 0 OR read IS NULL)
                   AND (message IS NULL OR length(message) < ?)
                 LIMIT ?
             """, (min_length, limit))
+            return [row[0] for row in cursor.fetchall()]
+        except sqlite3.Error:
+            return []
+
+    # Media deduplication methods
+
+    def get_messages_needing_media_hashes(self, channel_id: int, limit: int = 100) -> list[dict]:
+        """Get unread messages that need media hash generation.
+
+        Returns messages that have media_path (downloaded media) and media_hash_pending=1.
+        """
+        table_name = f"channel_{channel_id}"
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(f"""
+                SELECT id, media_path, media_type, grouped_id, date
+                FROM {table_name}
+                WHERE (media_hash_pending = 1 OR media_hash_pending IS NULL)
+                  AND (read = 0 OR read IS NULL)
+                  AND media_path IS NOT NULL
+                ORDER BY date DESC
+                LIMIT ?
+            """, (limit,))
+            return [{"id": row[0], "media_path": row[1], "media_type": row[2],
+                     "grouped_id": row[3], "date": row[4]}
+                    for row in cursor.fetchall()]
+        except sqlite3.Error:
+            return []
+
+    def get_album_messages(self, channel_id: int, grouped_id: int) -> list[dict]:
+        """Get all messages in an album (same grouped_id)."""
+        table_name = f"channel_{channel_id}"
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(f"""
+                SELECT *
+                FROM {table_name}
+                WHERE grouped_id = ?
+                ORDER BY id
+            """, (grouped_id,))
+            return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error:
+            return []
+
+    def update_media_hash(self, channel_id: int, message_id: int, media_hash: str) -> None:
+        """Update media hash for a message and mark as processed."""
+        table_name = f"channel_{channel_id}"
+        cursor = self.conn.cursor()
+        cursor.execute(f"""
+            UPDATE {table_name}
+            SET media_hash = ?, media_hash_pending = 0
+            WHERE id = ?
+        """, (media_hash, message_id))
+
+    def skip_media_hash(self, channel_id: int, message_id: int) -> None:
+        """Mark a message as skipped for media hashing (no media, error, etc.)."""
+        table_name = f"channel_{channel_id}"
+        cursor = self.conn.cursor()
+        cursor.execute(f"""
+            UPDATE {table_name} SET media_hash_pending = -1 WHERE id = ?
+        """, (message_id,))
+
+    def register_media_hash(self, media_hash: str, channel_id: int,
+                            message_id: int, message_date: int) -> tuple[int, int] | None:
+        """Register a media hash or return existing original if duplicate."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT channel_id, message_id FROM media_hashes WHERE hash = ?
+        """, (media_hash,))
+        existing = cursor.fetchone()
+
+        if existing:
+            return (existing[0], existing[1])
+
+        cursor.execute("""
+            INSERT INTO media_hashes (hash, channel_id, message_id, message_date, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (media_hash, channel_id, message_id, message_date, int(time.time())))
+
+        return None
+
+    def get_messages_without_media_for_skip(self, channel_id: int, limit: int = 500) -> list[int]:
+        """Get unread message IDs that have no media and should be skipped for media hashing."""
+        table_name = f"channel_{channel_id}"
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(f"""
+                SELECT id FROM {table_name}
+                WHERE (media_hash_pending = 1 OR media_hash_pending IS NULL)
+                  AND (read = 0 OR read IS NULL)
+                  AND media_path IS NULL
+                LIMIT ?
+            """, (limit,))
             return [row[0] for row in cursor.fetchall()]
         except sqlite3.Error:
             return []
@@ -1172,9 +1389,10 @@ class Database:
         elif channel_id is not None:
             allowed_channels = {channel_id}
 
-        # For trigram tokenizer, the query is used as-is for substring matching
-        # No need for special quoting - trigram handles partial matches naturally
-        safe_query = query
+        # For trigram tokenizer, wrap query in double quotes for substring matching
+        # Escape any double quotes in the query by doubling them
+        escaped_query = query.replace('"', '""')
+        safe_query = f'"{escaped_query}"'
 
         logger.info(f"[search_messages] Starting search for: '{query}'")
         logger.info(f"[search_messages] allowed_channels: {allowed_channels}")

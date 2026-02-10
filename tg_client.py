@@ -325,6 +325,51 @@ class TGClient:
         return await self._call("get_read_state", **params)
 
 
+class TGClientPool:
+    """Pool of TGClient connections for concurrent RPC calls.
+
+    Each connection handles one call at a time (due to the lock in TGClient),
+    so the pool size determines the actual concurrency.
+
+    Usage:
+        async with TGClientPool(size=5) as pool:
+            client = await pool.acquire()
+            try:
+                result = await client.download_media(...)
+            finally:
+                pool.release(client)
+    """
+
+    def __init__(self, size: int = 5, host: str = None, port: int = None):
+        self.size = size
+        self.host = host
+        self.port = port
+        self._clients: list[TGClient] = []
+        self._available: asyncio.Queue | None = None
+
+    async def __aenter__(self) -> "TGClientPool":
+        self._available = asyncio.Queue()
+        for _ in range(self.size):
+            client = TGClient(self.host, self.port)
+            await client.connect()
+            self._clients.append(client)
+            self._available.put_nowait(client)
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        for client in self._clients:
+            await client.close()
+        self._clients.clear()
+
+    async def acquire(self) -> TGClient:
+        """Get an available client from the pool. Blocks if none available."""
+        return await self._available.get()
+
+    def release(self, client: TGClient) -> None:
+        """Return a client to the pool."""
+        self._available.put_nowait(client)
+
+
 # Convenience function to check daemon availability
 async def is_daemon_running(host: str = None, port: int = None) -> bool:
     """Check if the TG daemon is running and responsive."""

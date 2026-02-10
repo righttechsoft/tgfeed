@@ -230,6 +230,19 @@
             background: #f9f9f9;
         }
 
+        .group-dedup-checkbox {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            color: #666;
+            cursor: pointer;
+        }
+
+        .group-dedup-checkbox input {
+            cursor: pointer;
+        }
+
         .group-item-name {
             flex: 1;
             font-size: 15px;
@@ -341,6 +354,27 @@
             font-size: 12px;
             text-transform: uppercase;
             letter-spacing: 0.5px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .group-header .collapse-arrow {
+            display: inline-block;
+            transition: transform 0.2s;
+            margin-right: 4px;
+            font-size: 10px;
+        }
+
+        .group-header .collapse-arrow.collapsed {
+            transform: rotate(-90deg);
+        }
+
+        .group-channels-list {
+            overflow: hidden;
+        }
+
+        .group-channels-list.collapsed {
+            display: none;
         }
 
         .channel-item {
@@ -871,6 +905,120 @@
 
         .duplicate-icon {
             font-size: 12px;
+        }
+
+        /* Variants carousel for duplicate messages */
+        .variants-carousel {
+            position: relative;
+        }
+
+        .variants-tabs {
+            display: flex;
+            gap: 4px;
+            padding: 8px 12px;
+            background: #f5f5f5;
+            border-bottom: 1px solid #e0e0e0;
+            overflow-x: auto;
+            scrollbar-width: none;
+        }
+
+        .variants-tabs::-webkit-scrollbar {
+            display: none;
+        }
+
+        .variant-tab {
+            padding: 4px 10px;
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all 0.2s;
+        }
+
+        .variant-tab:hover {
+            background: #e3f2fd;
+            border-color: #2196f3;
+        }
+
+        .variant-tab.active {
+            background: #2196f3;
+            color: white;
+            border-color: #2196f3;
+        }
+
+        .variants-container {
+            position: relative;
+            overflow: hidden;
+        }
+
+        .variants-slides {
+            display: flex;
+            transition: transform 0.3s ease;
+        }
+
+        .variant-slide {
+            flex: 0 0 100%;
+            min-width: 0;
+        }
+
+        .variant-nav {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 40px;
+            height: 60px;
+            background: rgba(0, 0, 0, 0.3);
+            border: none;
+            color: white;
+            font-size: 24px;
+            cursor: pointer;
+            z-index: 10;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+
+        .variants-carousel:hover .variant-nav {
+            opacity: 1;
+        }
+
+        .variant-nav:hover {
+            background: rgba(0, 0, 0, 0.5);
+        }
+
+        .variant-nav.prev {
+            left: 0;
+            border-radius: 0 4px 4px 0;
+        }
+
+        .variant-nav.next {
+            right: 0;
+            border-radius: 4px 0 0 4px;
+        }
+
+        .variant-nav:disabled {
+            opacity: 0.3;
+            cursor: default;
+        }
+
+        /* Mobile touch hint */
+        @media (max-width: 768px) {
+            .variant-nav {
+                display: none;
+            }
+
+            .variants-tabs {
+                padding: 6px 8px;
+            }
+
+            .variant-tab {
+                padding: 3px 8px;
+                font-size: 11px;
+            }
         }
 
         .file-info {
@@ -1565,6 +1713,22 @@
             fill: currentColor;
         }
 
+        /* Hide button */
+        .action-btn.hide.active {
+            background: #9E9E9E;
+            color: white;
+        }
+
+        .hide-icon {
+            width: 18px;
+            height: 18px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
         /* Anchor gallery on left side */
         .anchor-gallery {
             display: none;
@@ -1816,6 +1980,17 @@
             color: #ff6b6b;
         }
 
+        .debug-info .debug-value.hash {
+            color: #88ccff;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 10px;
+            max-width: 300px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: inline-block;
+            vertical-align: bottom;
+        }
+
         .debug-channel-id {
             display: none;
             font-family: 'Consolas', 'Monaco', monospace;
@@ -1940,6 +2115,7 @@
         let channels = [];
         let groups = [];
         let editingGroupId = null;  // Track which group is being edited
+        const collapsedChannelGroups = new Set();  // Track collapsed groups in Channels tab
         let currentGroupId = null;
         let currentChannelId = null;  // Filter to single channel
         let showingBookmarks = false;
@@ -1951,8 +2127,10 @@
         let latestDate = null;
         let loadingEarlier = false;
         let loadingLater = false;
+        let loadingMoreUnread = false;
         let noMoreEarlierMessages = false;
         let noMoreLaterMessages = false;
+        let noMoreUnreadMessages = false;
         let viewingFromOldest = false;
 
         // Search elements
@@ -2258,6 +2436,10 @@
                 } else {
                     html += `
                         <div class="group-item" data-group-id="${group.id}">
+                            <label class="group-dedup-checkbox" title="Enable deduplication for this group">
+                                <input type="checkbox" class="group-dedup-toggle" data-group-id="${group.id}" ${group.dedup ? 'checked' : ''}>
+                                <span>Dedup</span>
+                            </label>
                             <div class="group-item-name">${escapeHtml(group.name)}</div>
                             <div class="group-item-count">${channelCount} channel${channelCount !== 1 ? 's' : ''}</div>
                             <div class="group-item-actions">
@@ -2342,6 +2524,25 @@
                     }
                 });
             });
+
+            // Dedup toggle handlers
+            groupsList.querySelectorAll('.group-dedup-toggle').forEach(toggle => {
+                toggle.addEventListener('change', async (e) => {
+                    const groupId = parseInt(toggle.dataset.groupId);
+                    const dedup = toggle.checked ? 1 : 0;
+                    await fetch(`/api/group/${groupId}/dedup`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({dedup: dedup})
+                    });
+                    // Update local state
+                    const group = groups.find(g => g.id === groupId);
+                    if (group) {
+                        group.dedup = dedup;
+                    }
+                });
+            });
+
         }
 
         async function renameGroup(groupId, name) {
@@ -2390,7 +2591,7 @@
             renderGroupTabs();
         }
 
-        // Calculate unread counts per group
+        // Calculate unread counts per group (only active channels)
         function getGroupUnreadCounts() {
             const counts = {};
             groups.forEach(group => {
@@ -2398,7 +2599,7 @@
             });
 
             channels.forEach(channel => {
-                if (channel.group_id && channel.stats && channel.stats.unread) {
+                if (channel.active && channel.group_id && channel.stats && channel.stats.unread) {
                     counts[channel.group_id] = (counts[channel.group_id] || 0) + channel.stats.unread;
                 }
             });
@@ -2779,6 +2980,7 @@
             latestDate = null;
             noMoreEarlierMessages = false;
             noMoreLaterMessages = false;
+            noMoreUnreadMessages = false;
             viewingFromOldest = false;
 
             try {
@@ -2899,6 +3101,57 @@
             }
         }
 
+        // Load more unread messages when scrolled to bottom in normal feed mode
+        async function loadMoreUnreadMessages() {
+            if (!currentGroupId || loadingMoreUnread || noMoreUnreadMessages || viewingFromOldest || showingBookmarks) return;
+
+            loadingMoreUnread = true;
+
+            // Show loading indicator at bottom
+            const feed = document.querySelector('.feed');
+            const loadingEl = document.createElement('div');
+            loadingEl.className = 'loading-later';
+            loadingEl.textContent = 'Loading more...';
+            if (feed) {
+                feed.appendChild(loadingEl);
+            }
+
+            try {
+                let url = `/api/group/${currentGroupId}/messages?limit=100`;
+                if (currentChannelId) {
+                    url += `&channel=${currentChannelId}`;
+                }
+                const res = await fetch(url);
+                const moreMessages = await res.json();
+
+                // Remove loading indicator
+                loadingEl.remove();
+
+                if (moreMessages.length > 0) {
+                    // Dedupe: filter out any messages already in the list
+                    const existingIds = new Set(messages.map(m => `${m.channel_id}-${m.id}`));
+                    const newMessages = moreMessages.filter(m => !existingIds.has(`${m.channel_id}-${m.id}`));
+
+                    if (newMessages.length > 0) {
+                        // Append new unread messages at the bottom
+                        messages = [...messages, ...newMessages];
+                        updateEarliestDate();
+                        renderFeedAppend(newMessages);
+                    } else {
+                        // All returned messages are already displayed
+                        noMoreUnreadMessages = true;
+                    }
+                } else {
+                    noMoreUnreadMessages = true;
+                }
+            } catch (e) {
+                console.error('Failed to load more unread messages:', e);
+                loadingEl.remove();
+            } finally {
+                loadingMoreUnread = false;
+            }
+        }
+
         // Append new messages to the feed (for loading later messages)
         function renderFeedAppend(newMessages) {
             const feed = document.querySelector('.feed');
@@ -2908,8 +3161,9 @@
                 feed.innerHTML += renderMessage(msg);
             }
 
-            // Initialize new elements
-            initializeMessageElements();
+            // Re-setup observers and handlers for new elements
+            setupScrollObserver();
+            setupActionButtons();
         }
 
         // Load earlier messages manually (when clicking the button on empty feed)
@@ -3005,6 +3259,11 @@
                 // Load later messages when viewing from oldest and scrolled to bottom
                 if (viewingFromOldest && isAtBottom() && !loadingLater && !noMoreLaterMessages && currentChannelId) {
                     loadLaterMessages();
+                }
+
+                // Load more unread messages when scrolled to bottom in normal feed mode
+                if (!viewingFromOldest && isAtBottom() && !loadingMoreUnread && !noMoreUnreadMessages && currentGroupId && !showingBookmarks) {
+                    loadMoreUnreadMessages();
                 }
 
                 // Mark visible messages as read when scrolled to the bottom (no more messages below)
@@ -3148,41 +3407,77 @@
         // Setup action buttons for specific elements (used when prepending)
         function setupActionButtonsForElements(elements) {
             elements.forEach(el => {
+                // Check if this row contains a variants carousel
+                const carouselCard = el.querySelector('.message-card.variants-carousel');
+                const isCarousel = !!carouselCard;
+
+                // Setup carousel navigation if this is a carousel
+                if (isCarousel) {
+                    setupVariantCarousel(el, carouselCard);
+                }
+
                 const actions = el.querySelector('.message-actions');
                 if (actions) {
-                    const channelId = parseInt(actions.dataset.channelId);
-                    const messageId = parseInt(actions.dataset.messageId);
+                    // Get current message info - for carousels, use data-variants on the row
+                    const getMessageInfo = () => {
+                        if (isCarousel) {
+                            const variants = JSON.parse(el.dataset.variants || '[]');
+                            const currentIdx = parseInt(el.dataset.currentVariant || '0');
+                            const variant = variants[currentIdx] || variants[0];
+                            return {
+                                channelId: variant.channel_id,
+                                messageId: variant.message_id,
+                                albumIds: variant.album_ids
+                            };
+                        } else {
+                            return {
+                                channelId: parseInt(actions.dataset.channelId),
+                                messageId: parseInt(actions.dataset.messageId),
+                                albumIds: (actions.dataset.albumIds || '').split(',').map(Number)
+                            };
+                        }
+                    };
 
                     const thumbUp = actions.querySelector('.thumb-up');
                     const thumbDown = actions.querySelector('.thumb-down');
                     const bookmark = actions.querySelector('.bookmark');
 
-                    thumbUp.addEventListener('click', async () => {
-                        const isActive = thumbUp.classList.contains('active');
-                        const newRating = isActive ? 0 : 1;
-                        await updateRating(channelId, messageId, newRating);
-                        thumbUp.classList.toggle('active', newRating === 1);
-                        thumbDown.classList.remove('active');
-                    });
+                    if (thumbUp) {
+                        thumbUp.addEventListener('click', async () => {
+                            const { channelId, messageId } = getMessageInfo();
+                            const isActive = thumbUp.classList.contains('active');
+                            const newRating = isActive ? 0 : 1;
+                            await updateRating(channelId, messageId, newRating);
+                            thumbUp.classList.toggle('active', newRating === 1);
+                            if (thumbDown) thumbDown.classList.remove('active');
+                        });
+                    }
 
-                    thumbDown.addEventListener('click', async () => {
-                        const isActive = thumbDown.classList.contains('active');
-                        const newRating = isActive ? 0 : -1;
-                        await updateRating(channelId, messageId, newRating);
-                        thumbDown.classList.toggle('active', newRating === -1);
-                        thumbUp.classList.remove('active');
-                    });
+                    if (thumbDown) {
+                        thumbDown.addEventListener('click', async () => {
+                            const { channelId, messageId } = getMessageInfo();
+                            const isActive = thumbDown.classList.contains('active');
+                            const newRating = isActive ? 0 : -1;
+                            await updateRating(channelId, messageId, newRating);
+                            thumbDown.classList.toggle('active', newRating === -1);
+                            if (thumbUp) thumbUp.classList.remove('active');
+                        });
+                    }
 
-                    bookmark.addEventListener('click', async () => {
-                        const isActive = bookmark.classList.contains('active');
-                        const newBookmarked = isActive ? 0 : 1;
-                        await updateBookmark(channelId, messageId, newBookmarked);
-                        bookmark.classList.toggle('active', newBookmarked === 1);
-                    });
+                    if (bookmark) {
+                        bookmark.addEventListener('click', async () => {
+                            const { channelId, messageId } = getMessageInfo();
+                            const isActive = bookmark.classList.contains('active');
+                            const newBookmarked = isActive ? 0 : 1;
+                            await updateBookmark(channelId, messageId, newBookmarked);
+                            bookmark.classList.toggle('active', newBookmarked === 1);
+                        });
+                    }
 
                     const anchor = actions.querySelector('.anchor');
                     if (anchor) {
                         anchor.addEventListener('click', async () => {
+                            const { channelId, messageId } = getMessageInfo();
                             const isActive = anchor.classList.contains('active');
                             const newAnchored = isActive ? 0 : 1;
                             await updateAnchor(channelId, messageId, newAnchored);
@@ -3190,6 +3485,22 @@
                             // Refresh anchor gallery
                             if (currentChannelId) {
                                 loadAnchorGallery(currentChannelId);
+                            }
+                        });
+                    }
+
+                    const hideBtn = actions.querySelector('.hide');
+                    if (hideBtn) {
+                        hideBtn.addEventListener('click', async () => {
+                            const { channelId, messageId } = getMessageInfo();
+                            const isActive = hideBtn.classList.contains('active');
+                            const newHidden = isActive ? 0 : 1;
+                            await updateHidden(channelId, messageId, newHidden);
+                            hideBtn.classList.toggle('active', newHidden === 1);
+                            // Gray out and disable the message when hidden
+                            if (newHidden === 1) {
+                                el.style.opacity = '0.3';
+                                el.style.pointerEvents = 'none';
                             }
                         });
                     }
@@ -3324,8 +3635,280 @@
             }
         }
 
+        // Build debug info HTML for a message
+        function buildDebugInfo(msg) {
+            const isDuplicate = msg.duplicate_of_channel && msg.duplicate_of_message;
+
+            let html = `
+                <div class="debug-info">
+                    <div class="debug-row"><span class="debug-label">Message ID:</span><span class="debug-value">${msg.id}</span></div>
+                    <div class="debug-row"><span class="debug-label">Channel ID:</span><span class="debug-value">${msg.channel_id}</span></div>
+                    <div class="debug-row"><span class="debug-label">Date (Unix):</span><span class="debug-value">${msg.date}</span></div>
+                    <div class="debug-row"><span class="debug-label">Read:</span><span class="debug-value">${msg.read || 0}</span></div>
+                    <div class="debug-row"><span class="debug-label">Read at:</span><span class="debug-value">${msg.read_at ? new Date(msg.read_at * 1000).toLocaleString() : 'not read'}</span></div>
+                    <div class="debug-row"><span class="debug-label">Read synced:</span><span class="debug-value">${msg.read_synced_to_tg || 0}</span></div>
+                    <div class="debug-row"><span class="debug-label">Rating:</span><span class="debug-value">${msg.rating || 0}</span></div>
+                    <div class="debug-row"><span class="debug-label">Bookmarked:</span><span class="debug-value">${msg.bookmarked || 0}</span></div>
+                    <div class="debug-row"><span class="debug-label">Hidden:</span><span class="debug-value">${msg.hidden || 0}</span></div>
+                    <div class="debug-row"><span class="debug-label">Media type:</span><span class="debug-value">${msg.media_type || 'none'}</span></div>
+                    <div class="debug-row"><span class="debug-label">Media path:</span><span class="debug-value">${msg.media_path || 'none'}</span></div>
+                    <div class="debug-row"><span class="debug-label">Grouped ID:</span><span class="debug-value">${msg.grouped_id || 'none'}</span></div>
+                    <div class="debug-row"><span class="debug-label">Views:</span><span class="debug-value">${msg.views || 0}</span></div>
+                    <div class="debug-row"><span class="debug-label">Forwards:</span><span class="debug-value">${msg.forwards || 0}</span></div>`;
+
+            // Content hash fields
+            const contentHashStatus = msg.content_hash_pending === 1 ? 'pending' :
+                                      msg.content_hash_pending === -1 ? 'skipped' :
+                                      msg.content_hash_pending === 0 ? 'done' : 'unknown';
+            html += `<div class="debug-row"><span class="debug-label">Content hash status:</span><span class="debug-value">${contentHashStatus}</span></div>`;
+            if (msg.ai_summary) {
+                html += `<div class="debug-row"><span class="debug-label">AI Summary:</span><span class="debug-value ai-summary">${escapeHtml(msg.ai_summary)}</span></div>`;
+            }
+            if (msg.content_hash) {
+                html += `<div class="debug-row"><span class="debug-label">Content hash:</span><span class="debug-value hash">${escapeHtml(msg.content_hash)}</span></div>`;
+            }
+
+            // Media hash fields
+            const mediaHashStatus = msg.media_hash_pending === 1 ? 'pending' :
+                                    msg.media_hash_pending === -1 ? 'skipped (no media)' :
+                                    msg.media_hash_pending === 0 ? 'done' : 'unknown';
+            html += `<div class="debug-row"><span class="debug-label">Media hash status:</span><span class="debug-value">${mediaHashStatus}</span></div>`;
+            if (msg.media_hash) {
+                html += `<div class="debug-row"><span class="debug-label">Media hash:</span><span class="debug-value hash">${escapeHtml(msg.media_hash)}</span></div>`;
+            }
+
+            // Duplicate info
+            if (isDuplicate) {
+                html += `<div class="debug-row"><span class="debug-label">Duplicate of:</span><span class="debug-value duplicate">channel ${msg.duplicate_of_channel} / msg ${msg.duplicate_of_message}</span></div>`;
+            }
+
+            // Variant info (if this message has duplicates pointing to it)
+            if (msg.variants && msg.variants.length > 1) {
+                html += `<div class="debug-row"><span class="debug-label">Variants:</span><span class="debug-value">${msg.variants.length} (original + ${msg.variants.length - 1} duplicates)</span></div>`;
+            }
+
+            html += '</div>';
+            return html;
+        }
+
+        // Render a single message card content (used by renderMessage and variants)
+        function renderMessageCardContent(msg) {
+            const date = msg.date ? new Date(msg.date * 1000).toLocaleString() : '';
+            const photoUrl = `/api/channel/${msg.channel_id}/photo`;
+            const initial = msg.channel_title ? msg.channel_title[0].toUpperCase() : '?';
+
+            // Build Telegram link for the message
+            let telegramLink = '';
+            if (msg.channel_username) {
+                telegramLink = `https://t.me/${msg.channel_username}/${msg.id}`;
+            } else {
+                const shortChannelId = String(msg.channel_id).replace(/^-100/, '');
+                telegramLink = `https://t.me/c/${shortChannelId}/${msg.id}`;
+            }
+
+            let textHtml = escapeHtml(msg.message || '');
+            if (msg.entities) {
+                try {
+                    const entities = typeof msg.entities === 'string' ? JSON.parse(msg.entities) : msg.entities;
+                    textHtml = applyEntities(msg.message || '', entities);
+                } catch (e) {}
+            }
+
+            // Render media
+            let mediaHtml = '';
+            let mediaItems = msg.media_items || [];
+            if (mediaItems.length === 0 && msg.media_type && !msg.media_path) {
+                mediaItems = [{ type: msg.media_type, path: null, message_id: msg.id }];
+            }
+
+            if (mediaItems.length === 1) {
+                const item = mediaItems[0];
+                const effectiveType = getEffectiveMediaType(item);
+                if (effectiveType === 'photo') {
+                    mediaHtml = renderImage(item, msg.channel_id, msg.id);
+                } else if (effectiveType === 'video') {
+                    mediaHtml = renderVideo(item, msg.channel_id, msg.id);
+                } else if (effectiveType === 'audio' || effectiveType === 'voice') {
+                    mediaHtml = renderAudioPlayer(item, msg.channel_id, msg.id);
+                } else if (item.path || item.type) {
+                    mediaHtml = renderFileAttachment(item, msg.channel_id, msg.id);
+                }
+            } else if (mediaItems.length > 1) {
+                mediaItems.forEach(item => {
+                    const effectiveType = getEffectiveMediaType(item);
+                    if (effectiveType === 'photo') {
+                        mediaHtml += renderImage(item, msg.channel_id, item.message_id || msg.id);
+                    } else if (effectiveType === 'video') {
+                        mediaHtml += renderVideo(item, msg.channel_id, item.message_id || msg.id);
+                    } else if (effectiveType === 'audio' || effectiveType === 'voice') {
+                        mediaHtml += renderAudioPlayer(item, msg.channel_id, item.message_id || msg.id);
+                    } else if (item.path || item.type) {
+                        mediaHtml += renderFileAttachment(item, msg.channel_id, item.message_id || msg.id);
+                    }
+                });
+            }
+
+            // Telegraph preview
+            let telegraphHtml = '';
+            const telegraphInfo = getTelegraphInfo(msg);
+            if (telegraphInfo) {
+                const localUrl = `/telegraph/${msg.channel_id}/${telegraphInfo.slug}.html`;
+                const previewId = `telegraph-${msg.channel_id}-${msg.id}`;
+                telegraphHtml = `
+                    <div class="telegraph-preview" id="${previewId}">
+                        <div class="telegraph-iframe-container">
+                            <iframe class="telegraph-iframe" src="${localUrl}" loading="lazy"></iframe>
+                        </div>
+                        <div class="telegraph-actions">
+                            <button class="telegraph-btn telegraph-expand-btn">&#128196; Read Full</button>
+                            <a href="${localUrl}" target="_blank" class="telegraph-btn secondary">&#128279; Open in New Tab</a>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // YouTube embeds
+            let youtubeHtml = '';
+            const youtubeVideos = getYoutubeVideos(msg);
+            for (const videoId of youtubeVideos) {
+                youtubeHtml += `
+                    <div class="youtube-embed">
+                        <iframe src="https://www.youtube.com/embed/${videoId}" loading="lazy"
+                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                            allowfullscreen></iframe>
+                    </div>
+                `;
+            }
+
+            // Reply
+            let replyHtml = '';
+            if (msg.reply_to_msg_id) {
+                const replyId = `reply-${msg.channel_id}-${msg.id}`;
+                replyHtml = `
+                    <div class="message-reply" id="${replyId}" data-channel-id="${msg.channel_id}" data-reply-to="${msg.reply_to_msg_id}">
+                        <div class="message-reply-header">Reply to message</div>
+                        <div class="message-reply-content">
+                            <div class="message-reply-text message-reply-loading">Loading...</div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            let statsHtml = '';
+            if (msg.views || msg.forwards) {
+                statsHtml = '<div class="message-stats">';
+                if (msg.views) statsHtml += `<span>${msg.views} views</span>`;
+                if (msg.forwards) statsHtml += `<span>${msg.forwards} forwards</span>`;
+                statsHtml += '</div>';
+            }
+
+            return `
+                <div class="message-header">
+                    <div class="message-channel-icon">
+                        <img src="${photoUrl}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='${initial}'">
+                    </div>
+                    <div class="message-channel-info">
+                        <a class="message-channel-name channel-name-link" data-channel-id="${msg.channel_id}">${escapeHtml(msg.channel_title || '')}<span class="debug-channel-id">[${msg.channel_id}]</span></a>
+                        <a class="message-date" href="${telegramLink}" target="_blank" title="Open in Telegram">${date}</a>
+                    </div>
+                </div>
+                <div class="message-body">
+                    ${replyHtml}
+                    <div class="message-text">${textHtml}</div>
+                    ${mediaHtml}
+                    ${telegraphHtml}
+                    ${youtubeHtml}
+                </div>
+                ${statsHtml}
+                ${buildDebugInfo(msg)}
+            `;
+        }
+
+        // Render a message with multiple variants (duplicates from different channels)
+        function renderMessageWithVariants(msg) {
+            const variants = msg.variants;
+            const primaryVariant = variants[0]; // Use first variant as primary for data attributes
+
+            // Build tabs HTML
+            const tabsHtml = variants.map((v, idx) => {
+                const activeClass = idx === 0 ? 'active' : '';
+                const channelName = escapeHtml(v.channel_title || `Channel ${v.channel_id}`);
+                return `<button class="variant-tab ${activeClass}" data-variant-idx="${idx}">${channelName}</button>`;
+            }).join('');
+
+            // Build slides HTML
+            const slidesHtml = variants.map((v, idx) => {
+                const activeClass = idx === 0 ? 'active' : '';
+                return `<div class="variant-slide ${activeClass}" data-variant-idx="${idx}">${renderMessageCardContent(v)}</div>`;
+            }).join('');
+
+            // Action buttons use primary variant's state initially
+            const rating = primaryVariant.rating || 0;
+            const bookmarked = primaryVariant.bookmarked || 0;
+            const anchored = primaryVariant.anchored || 0;
+            const hiddenActive = primaryVariant.hidden === 1 ? 'active' : '';
+            const thumbUpActive = rating === 1 ? 'active' : '';
+            const thumbDownActive = rating === -1 ? 'active' : '';
+            const bookmarkActive = bookmarked === 1 ? 'active' : '';
+            const anchorActive = anchored === 1 ? 'active' : '';
+
+            // Store all variant IDs and states as JSON for action buttons
+            const variantsData = JSON.stringify(variants.map(v => ({
+                channel_id: v.channel_id,
+                message_id: v.id,
+                album_ids: v.album_message_ids || [v.id],
+                rating: v.rating || 0,
+                bookmarked: v.bookmarked || 0,
+                anchored: v.anchored || 0,
+                hidden: v.hidden || 0
+            })));
+
+            const albumIds = (primaryVariant.album_message_ids || [primaryVariant.id]).join(',');
+
+            return `
+                <div class="message-row"
+                     data-channel-id="${primaryVariant.channel_id}"
+                     data-message-id="${primaryVariant.id}"
+                     data-album-ids="${albumIds}"
+                     data-read="${primaryVariant.read || 0}"
+                     data-variants='${variantsData}'
+                     data-current-variant="0">
+                    <button class="skip-btn" title="Skip to next message">&#8595;</button>
+                    <div class="message-card variants-carousel">
+                        <div class="variants-tabs">${tabsHtml}</div>
+                        <div class="variants-container">
+                            <button class="variant-nav prev" disabled>&#10094;</button>
+                            <div class="variants-slides">${slidesHtml}</div>
+                            <button class="variant-nav next" ${variants.length <= 1 ? 'disabled' : ''}>&#10095;</button>
+                        </div>
+                    </div>
+                    <div class="message-actions">
+                        <button class="action-btn thumb-up ${thumbUpActive}" title="Like">&#128077;</button>
+                        <button class="action-btn thumb-down ${thumbDownActive}" title="Dislike">&#128078;</button>
+                        <button class="action-btn bookmark ${bookmarkActive}" title="Bookmark">
+                            <svg class="bookmark-icon ${bookmarkActive ? 'filled' : ''}" viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>
+                        </button>
+                        <button class="action-btn anchor ${anchorActive}" title="Anchor">
+                            <svg class="anchor-icon" viewBox="0 0 24 24"><circle cx="12" cy="5" r="3"></circle><line x1="12" y1="8" x2="12" y2="21"></line><path d="M5 12H2a10 10 0 0 0 20 0h-3"></path></svg>
+                        </button>
+                        <button class="action-btn hide ${hiddenActive}" title="Hide">
+                            <svg class="hide-icon" viewBox="0 0 24 24">
+                                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+                                <line x1="1" y1="1" x2="23" y2="23"></line>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            `;
+        }
+
         // Render a single message
         function renderMessage(msg) {
+            // Check if this message has variants (duplicates)
+            if (msg.variants && msg.variants.length > 1) {
+                return renderMessageWithVariants(msg);
+            }
+
             const date = msg.date ? new Date(msg.date * 1000).toLocaleString() : '';
             const photoUrl = `/api/channel/${msg.channel_id}/photo`;
             const initial = msg.channel_title ? msg.channel_title[0].toUpperCase() : '?';
@@ -3463,6 +4046,7 @@
             const thumbDownActive = rating === -1 ? 'active' : '';
             const bookmarkActive = bookmarked === 1 ? 'active' : '';
             const anchorActive = anchored === 1 ? 'active' : '';
+            const hiddenActive = msg.hidden === 1 ? 'active' : '';
 
             // Check if this message is a duplicate
             const isDuplicate = msg.duplicate_of_channel && msg.duplicate_of_message;
@@ -3474,33 +4058,8 @@
                 </div>
             ` : '';
 
-            // Build debug info HTML
-            let debugInfoHtml = `
-                <div class="debug-info">
-                    <div class="debug-row"><span class="debug-label">Message ID:</span><span class="debug-value">${msg.id}</span></div>
-                    <div class="debug-row"><span class="debug-label">Channel ID:</span><span class="debug-value">${msg.channel_id}</span></div>
-                    <div class="debug-row"><span class="debug-label">Date (Unix):</span><span class="debug-value">${msg.date}</span></div>
-                    <div class="debug-row"><span class="debug-label">Read:</span><span class="debug-value">${msg.read || 0}</span></div>
-                    <div class="debug-row"><span class="debug-label">Read synced:</span><span class="debug-value">${msg.read_synced_to_tg || 0}</span></div>
-                    <div class="debug-row"><span class="debug-label">Rating:</span><span class="debug-value">${msg.rating || 0}</span></div>
-                    <div class="debug-row"><span class="debug-label">Bookmarked:</span><span class="debug-value">${msg.bookmarked || 0}</span></div>
-                    <div class="debug-row"><span class="debug-label">Media type:</span><span class="debug-value">${msg.media_type || 'none'}</span></div>
-                    <div class="debug-row"><span class="debug-label">Media path:</span><span class="debug-value">${msg.media_path || 'none'}</span></div>
-                    <div class="debug-row"><span class="debug-label">Grouped ID:</span><span class="debug-value">${msg.grouped_id || 'none'}</span></div>
-                    <div class="debug-row"><span class="debug-label">Views:</span><span class="debug-value">${msg.views || 0}</span></div>
-                    <div class="debug-row"><span class="debug-label">Forwards:</span><span class="debug-value">${msg.forwards || 0}</span></div>`;
-
-            // Add AI summary if present
-            if (msg.ai_summary) {
-                debugInfoHtml += `<div class="debug-row"><span class="debug-label">AI Summary:</span><span class="debug-value ai-summary">${escapeHtml(msg.ai_summary)}</span></div>`;
-            }
-            if (msg.content_hash) {
-                debugInfoHtml += `<div class="debug-row"><span class="debug-label">Content hash:</span><span class="debug-value">${escapeHtml(msg.content_hash)}</span></div>`;
-            }
-            if (isDuplicate) {
-                debugInfoHtml += `<div class="debug-row"><span class="debug-label">Duplicate of:</span><span class="debug-value duplicate">channel ${msg.duplicate_of_channel} / msg ${msg.duplicate_of_message}</span></div>`;
-            }
-            debugInfoHtml += '</div>';
+            // Build debug info HTML using helper
+            const debugInfoHtml = buildDebugInfo(msg);
 
             return `
                 <div class="message-row${duplicateClass}">
@@ -3534,6 +4093,12 @@
                         </button>
                         <button class="action-btn anchor ${anchorActive}" title="Anchor">
                             <svg class="anchor-icon" viewBox="0 0 24 24"><circle cx="12" cy="5" r="3"></circle><line x1="12" y1="8" x2="12" y2="21"></line><path d="M5 12H2a10 10 0 0 0 20 0h-3"></path></svg>
+                        </button>
+                        <button class="action-btn hide ${hiddenActive}" title="Hide">
+                            <svg class="hide-icon" viewBox="0 0 24 24">
+                                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+                                <line x1="1" y1="1" x2="23" y2="23"></line>
+                            </svg>
                         </button>
                     </div>
                 </div>
@@ -3860,15 +4425,47 @@
                     // Message scrolled out of view above the viewport (user scrolled down past it)
                     if (!entry.isIntersecting && entry.boundingClientRect.bottom < 56) {
                         const card = entry.target;
-                        const channelId = parseInt(card.dataset.channelId);
-                        const albumIds = card.dataset.albumIds.split(',').map(id => parseInt(id));
-                        const key = `${channelId}-${albumIds.join('-')}`;
-                        const isAlreadyRead = card.dataset.read === '1';
+                        // For carousel cards, data is on the parent row; for regular cards, data is on the card itself
+                        const dataSource = card.classList.contains('variants-carousel')
+                            ? card.closest('.message-row')
+                            : card;
+                        if (!dataSource) return;
 
-                        // Only mark as read if not already read and not already processed
-                        if (!isAlreadyRead && !readMessages.has(key)) {
-                            readMessages.add(key);
-                            markAlbumAsRead(channelId, albumIds);
+                        // Check if this is a carousel with variants
+                        const variantsData = dataSource.dataset.variants;
+                        if (variantsData) {
+                            // Carousel with multiple variants - mark ALL as read
+                            try {
+                                const variants = JSON.parse(variantsData);
+                                const allMessages = [];
+                                variants.forEach(v => {
+                                    const albumIds = v.album_ids || [v.message_id];
+                                    albumIds.forEach(msgId => {
+                                        const key = `${v.channel_id}-${msgId}`;
+                                        if (!readMessages.has(key)) {
+                                            readMessages.add(key);
+                                            allMessages.push({channel_id: v.channel_id, message_id: msgId});
+                                        }
+                                    });
+                                });
+                                if (allMessages.length > 0) {
+                                    markMultipleMessagesAsRead(allMessages);
+                                }
+                            } catch (e) {
+                                console.error('Failed to parse variants for read marking:', e);
+                            }
+                        } else {
+                            // Regular message or album
+                            const channelId = parseInt(dataSource.dataset.channelId);
+                            const albumIds = (dataSource.dataset.albumIds || '').split(',').map(id => parseInt(id));
+                            const key = `${channelId}-${albumIds.join('-')}`;
+                            const isAlreadyRead = dataSource.dataset.read === '1';
+
+                            // Only mark as read if not already read and not already processed
+                            if (!isAlreadyRead && !readMessages.has(key)) {
+                                readMessages.add(key);
+                                markAlbumAsRead(channelId, albumIds);
+                            }
                         }
                     }
                 });
@@ -3877,12 +4474,13 @@
                 rootMargin: '-56px 0px 0px 0px' // Account for header height
             });
 
+            // Observe all message cards (including those that are variant carousels)
             document.querySelectorAll('.message-card').forEach(card => {
                 currentObserver.observe(card);
             });
         }
 
-        // Mark all messages in an album as read
+        // Mark all messages in an album as read (single channel)
         async function markAlbumAsRead(channelId, messageIds) {
             try {
                 const messages = messageIds.map(id => ({channel_id: channelId, message_id: id}));
@@ -3904,42 +4502,209 @@
             }
         }
 
+        // Mark messages from multiple channels as read (for carousel variants)
+        async function markMultipleMessagesAsRead(messages) {
+            if (!messages || messages.length === 0) return;
+            try {
+                await fetch('/api/messages/read', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ messages })
+                });
+
+                // Update local channel stats for all affected channels
+                const countsByChannel = {};
+                messages.forEach(m => {
+                    countsByChannel[m.channel_id] = (countsByChannel[m.channel_id] || 0) + 1;
+                });
+
+                Object.entries(countsByChannel).forEach(([chId, count]) => {
+                    const channel = channels.find(c => c.id === parseInt(chId));
+                    if (channel && channel.stats && channel.stats.unread > 0) {
+                        channel.stats.unread = Math.max(0, channel.stats.unread - count);
+                    }
+                });
+
+                renderGroupTabs();
+            } catch (e) {
+                console.error('Failed to mark multiple messages as read:', e);
+            }
+        }
+
+        // Setup variant carousel navigation (tabs, arrows, swipe)
+        // row: the message-row element (has data-variants, data-current-variant)
+        // card: the message-card.variants-carousel element (has tabs, slides, nav buttons)
+        function setupVariantCarousel(row, card) {
+            const tabs = card.querySelectorAll('.variant-tab');
+            const slides = card.querySelectorAll('.variant-slide');
+            const slidesContainer = card.querySelector('.variants-slides');
+            const prevBtn = card.querySelector('.variant-nav.prev');
+            const nextBtn = card.querySelector('.variant-nav.next');
+            const variants = JSON.parse(row.dataset.variants || '[]');
+
+            function showVariant(idx) {
+                if (idx < 0 || idx >= variants.length) return;
+
+                // Update current variant on the row (where data is stored)
+                row.dataset.currentVariant = idx;
+
+                // Update tabs
+                tabs.forEach((tab, i) => {
+                    tab.classList.toggle('active', i === idx);
+                });
+
+                // Slide to variant
+                slidesContainer.style.transform = `translateX(-${idx * 100}%)`;
+
+                // Update nav buttons
+                if (prevBtn) prevBtn.disabled = idx === 0;
+                if (nextBtn) nextBtn.disabled = idx === variants.length - 1;
+
+                // Update action button states based on current variant
+                // The variant data contains the state for each message
+                const variant = variants[idx];
+                const actions = row.querySelector('.message-actions');
+                if (actions && variant) {
+                    const thumbUp = actions.querySelector('.thumb-up');
+                    const thumbDown = actions.querySelector('.thumb-down');
+                    const bookmark = actions.querySelector('.bookmark');
+                    const anchor = actions.querySelector('.anchor');
+                    const hideBtn = actions.querySelector('.hide');
+
+                    // Update button states based on variant data
+                    const rating = variant.rating || 0;
+                    if (thumbUp) thumbUp.classList.toggle('active', rating === 1);
+                    if (thumbDown) thumbDown.classList.toggle('active', rating === -1);
+                    if (bookmark) bookmark.classList.toggle('active', variant.bookmarked === 1);
+                    if (anchor) anchor.classList.toggle('active', variant.anchored === 1);
+                    if (hideBtn) hideBtn.classList.toggle('active', variant.hidden === 1);
+                }
+            }
+
+            // Tab click handlers
+            tabs.forEach((tab, idx) => {
+                tab.addEventListener('click', () => showVariant(idx));
+            });
+
+            // Navigation button handlers
+            if (prevBtn) {
+                prevBtn.addEventListener('click', () => {
+                    const current = parseInt(row.dataset.currentVariant || '0');
+                    showVariant(current - 1);
+                });
+            }
+            if (nextBtn) {
+                nextBtn.addEventListener('click', () => {
+                    const current = parseInt(row.dataset.currentVariant || '0');
+                    showVariant(current + 1);
+                });
+            }
+
+            // Touch swipe support
+            let touchStartX = 0;
+            let touchEndX = 0;
+            const container = card.querySelector('.variants-container');
+
+            if (container) {
+                container.addEventListener('touchstart', (e) => {
+                    touchStartX = e.changedTouches[0].screenX;
+                }, { passive: true });
+
+                container.addEventListener('touchend', (e) => {
+                    touchEndX = e.changedTouches[0].screenX;
+                    const diff = touchStartX - touchEndX;
+                    const current = parseInt(row.dataset.currentVariant || '0');
+
+                    // Minimum swipe distance
+                    if (Math.abs(diff) > 50) {
+                        if (diff > 0 && current < variants.length - 1) {
+                            // Swipe left -> next
+                            showVariant(current + 1);
+                        } else if (diff < 0 && current > 0) {
+                            // Swipe right -> prev
+                            showVariant(current - 1);
+                        }
+                    }
+                }, { passive: true });
+            }
+        }
+
         // Setup action button handlers
         function setupActionButtons() {
-            document.querySelectorAll('.message-actions').forEach(actions => {
-                const channelId = parseInt(actions.dataset.channelId);
-                const messageId = parseInt(actions.dataset.messageId);
+            // Setup handlers for all message rows including carousels
+            document.querySelectorAll('.message-row').forEach(row => {
+                // Check if this row contains a variants carousel
+                const carouselCard = row.querySelector('.message-card.variants-carousel');
+                const isCarousel = !!carouselCard;
+
+                // Setup carousel navigation if needed
+                if (isCarousel) {
+                    setupVariantCarousel(row, carouselCard);
+                }
+
+                const actions = row.querySelector('.message-actions');
+                if (!actions) return;
+
+                // Get current message info - for carousels, use data-variants on the row
+                const getMessageInfo = () => {
+                    if (isCarousel) {
+                        const variants = JSON.parse(row.dataset.variants || '[]');
+                        const currentIdx = parseInt(row.dataset.currentVariant || '0');
+                        const variant = variants[currentIdx] || variants[0];
+                        return {
+                            channelId: variant.channel_id,
+                            messageId: variant.message_id,
+                            albumIds: variant.album_ids
+                        };
+                    } else {
+                        return {
+                            channelId: parseInt(actions.dataset.channelId),
+                            messageId: parseInt(actions.dataset.messageId),
+                            albumIds: (actions.dataset.albumIds || '').split(',').map(Number)
+                        };
+                    }
+                };
 
                 const thumbUp = actions.querySelector('.thumb-up');
                 const thumbDown = actions.querySelector('.thumb-down');
                 const bookmark = actions.querySelector('.bookmark');
 
-                thumbUp.addEventListener('click', async () => {
-                    const isActive = thumbUp.classList.contains('active');
-                    const newRating = isActive ? 0 : 1;
-                    await updateRating(channelId, messageId, newRating);
-                    thumbUp.classList.toggle('active', newRating === 1);
-                    thumbDown.classList.remove('active');
-                });
+                if (thumbUp) {
+                    thumbUp.addEventListener('click', async () => {
+                        const { channelId, messageId } = getMessageInfo();
+                        const isActive = thumbUp.classList.contains('active');
+                        const newRating = isActive ? 0 : 1;
+                        await updateRating(channelId, messageId, newRating);
+                        thumbUp.classList.toggle('active', newRating === 1);
+                        if (thumbDown) thumbDown.classList.remove('active');
+                    });
+                }
 
-                thumbDown.addEventListener('click', async () => {
-                    const isActive = thumbDown.classList.contains('active');
-                    const newRating = isActive ? 0 : -1;
-                    await updateRating(channelId, messageId, newRating);
-                    thumbDown.classList.toggle('active', newRating === -1);
-                    thumbUp.classList.remove('active');
-                });
+                if (thumbDown) {
+                    thumbDown.addEventListener('click', async () => {
+                        const { channelId, messageId } = getMessageInfo();
+                        const isActive = thumbDown.classList.contains('active');
+                        const newRating = isActive ? 0 : -1;
+                        await updateRating(channelId, messageId, newRating);
+                        thumbDown.classList.toggle('active', newRating === -1);
+                        if (thumbUp) thumbUp.classList.remove('active');
+                    });
+                }
 
-                bookmark.addEventListener('click', async () => {
-                    const isActive = bookmark.classList.contains('active');
-                    const newBookmarked = isActive ? 0 : 1;
-                    await updateBookmark(channelId, messageId, newBookmarked);
-                    bookmark.classList.toggle('active', newBookmarked === 1);
-                });
+                if (bookmark) {
+                    bookmark.addEventListener('click', async () => {
+                        const { channelId, messageId } = getMessageInfo();
+                        const isActive = bookmark.classList.contains('active');
+                        const newBookmarked = isActive ? 0 : 1;
+                        await updateBookmark(channelId, messageId, newBookmarked);
+                        bookmark.classList.toggle('active', newBookmarked === 1);
+                    });
+                }
 
                 const anchor = actions.querySelector('.anchor');
                 if (anchor) {
                     anchor.addEventListener('click', async () => {
+                        const { channelId, messageId } = getMessageInfo();
                         const isActive = anchor.classList.contains('active');
                         const newAnchored = isActive ? 0 : 1;
                         await updateAnchor(channelId, messageId, newAnchored);
@@ -3950,10 +4715,26 @@
                         }
                     });
                 }
+
+                const hideBtn = actions.querySelector('.hide');
+                if (hideBtn) {
+                    hideBtn.addEventListener('click', async () => {
+                        const { channelId, messageId } = getMessageInfo();
+                        const isActive = hideBtn.classList.contains('active');
+                        const newHidden = isActive ? 0 : 1;
+                        await updateHidden(channelId, messageId, newHidden);
+                        hideBtn.classList.toggle('active', newHidden === 1);
+                        // Gray out and disable the message when hidden
+                        if (newHidden === 1) {
+                            row.style.opacity = '0.3';
+                            row.style.pointerEvents = 'none';
+                        }
+                    });
+                }
             });
 
-            // Channel name click handlers in message cards
-            document.querySelectorAll('.message-card .channel-name-link').forEach(link => {
+            // Channel name click handlers in message cards and carousel slides
+            document.querySelectorAll('.message-card .channel-name-link, .variant-slide .channel-name-link').forEach(link => {
                 link.addEventListener('click', (e) => {
                     e.preventDefault();
                     const channelId = parseInt(link.dataset.channelId);
@@ -4139,6 +4920,18 @@
             }
         }
 
+        async function updateHidden(channelId, messageId, hidden) {
+            try {
+                await fetch('/api/message/hide', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ channel_id: channelId, message_id: messageId, hidden })
+                });
+            } catch (e) {
+                console.error('Failed to update hidden:', e);
+            }
+        }
+
         // Anchor gallery for single channel view
         const anchorGallery = document.getElementById('anchorGallery');
         let currentAnchors = [];
@@ -4280,23 +5073,27 @@
             let html = '';
 
             // Render grouped channels
-            Object.values(grouped).forEach(group => {
+            Object.entries(grouped).forEach(([groupId, group]) => {
+                const isCollapsed = collapsedChannelGroups.has(groupId);
                 html += `<div class="channel-group">`;
-                html += `<div class="group-header">${escapeHtml(group.name)}</div>`;
+                html += `<div class="group-header" data-group-key="${groupId}"><span class="collapse-arrow${isCollapsed ? ' collapsed' : ''}">&#9660;</span>${escapeHtml(group.name)}</div>`;
+                html += `<div class="group-channels-list${isCollapsed ? ' collapsed' : ''}" data-group-key="${groupId}">`;
                 group.channels.forEach(channel => {
                     html += renderChannelItem(channel);
                 });
-                html += `</div>`;
+                html += `</div></div>`;
             });
 
             // Render ungrouped channels
             if (ungrouped.length > 0) {
+                const isCollapsed = collapsedChannelGroups.has('ungrouped');
                 html += `<div class="channel-group">`;
-                html += `<div class="group-header">Ungrouped</div>`;
+                html += `<div class="group-header" data-group-key="ungrouped"><span class="collapse-arrow${isCollapsed ? ' collapsed' : ''}">&#9660;</span>Ungrouped</div>`;
+                html += `<div class="group-channels-list${isCollapsed ? ' collapsed' : ''}" data-group-key="ungrouped">`;
                 ungrouped.forEach(channel => {
                     html += renderChannelItem(channel);
                 });
-                html += `</div>`;
+                html += `</div></div>`;
             }
 
             channelList.innerHTML = html;
@@ -4328,6 +5125,24 @@
                     e.preventDefault();
                     const channelId = parseInt(link.dataset.channelId);
                     selectChannel(channelId);
+                });
+            });
+
+            // Group header collapse toggle
+            channelList.querySelectorAll('.group-header').forEach(header => {
+                header.addEventListener('click', () => {
+                    const key = header.dataset.groupKey;
+                    const channelsDiv = channelList.querySelector(`.group-channels-list[data-group-key="${key}"]`);
+                    const arrow = header.querySelector('.collapse-arrow');
+                    if (collapsedChannelGroups.has(key)) {
+                        collapsedChannelGroups.delete(key);
+                        channelsDiv.classList.remove('collapsed');
+                        arrow.classList.remove('collapsed');
+                    } else {
+                        collapsedChannelGroups.add(key);
+                        channelsDiv.classList.add('collapsed');
+                        arrow.classList.add('collapsed');
+                    }
                 });
             });
         }
@@ -4532,11 +5347,11 @@
                 const res = await fetch('/api/channels');
                 const freshChannels = await res.json();
 
-                // Calculate old unread count for current group before updating
+                // Calculate old unread count for current group before updating (only active channels)
                 let oldGroupUnread = 0;
                 if (currentGroupId && !showingBookmarks) {
                     channels.forEach(ch => {
-                        if (ch.group_id === currentGroupId && ch.stats && ch.stats.unread) {
+                        if (ch.active && ch.group_id === currentGroupId && ch.stats && ch.stats.unread) {
                             oldGroupUnread += ch.stats.unread;
                         }
                     });
@@ -4550,11 +5365,11 @@
                     }
                 });
 
-                // Calculate new unread count for current group after updating
+                // Calculate new unread count for current group after updating (only active channels)
                 let newGroupUnread = 0;
                 if (currentGroupId && !showingBookmarks) {
                     channels.forEach(ch => {
-                        if (ch.group_id === currentGroupId && ch.stats && ch.stats.unread) {
+                        if (ch.active && ch.group_id === currentGroupId && ch.stats && ch.stats.unread) {
                             newGroupUnread += ch.stats.unread;
                         }
                     });

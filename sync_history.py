@@ -21,7 +21,7 @@ from pathlib import Path
 import time
 from config import MEDIA_DIR, PAUSE_FILE
 from database import Database, DatabaseMigration
-from tg_client import TGClient, TGClientConnectionError, TGFloodWaitError, is_daemon_running
+from tg_client import TGClient, TGClientPool, TGClientConnectionError, TGFloodWaitError, is_daemon_running
 
 
 def check_pause():
@@ -144,7 +144,7 @@ logger = logging.getLogger(__name__)
 
 # Concurrency settings for media downloads
 CONCURRENT_DOWNLOADS = 5
-MESSAGES_PER_BATCH = 500  # Download more messages per batch for history
+MESSAGES_PER_BATCH = 10  # Messages per batch for history
 
 
 async def sync_history_via_daemon() -> None:
@@ -154,7 +154,7 @@ async def sync_history_via_daemon() -> None:
     # Run migrations
     DatabaseMigration().migrate()
 
-    async with TGClient() as client:
+    async with TGClient() as client, TGClientPool(size=CONCURRENT_DOWNLOADS) as pool:
         # Ping to verify connection
         status = await client.ping()
         logger.info(f"Connected to daemon (clients: {status['clients']})")
@@ -169,7 +169,6 @@ async def sync_history_via_daemon() -> None:
 
         logger.info(f"Found {len(channels)} channels with download_all enabled")
 
-        download_semaphore = asyncio.Semaphore(CONCURRENT_DOWNLOADS)
         total_messages = 0
         total_media = 0
         total_from_backup = 0
@@ -239,14 +238,15 @@ async def sync_history_via_daemon() -> None:
                     logger.info(f"    Processing {len(messages_with_media)} media files ({CONCURRENT_DOWNLOADS} concurrent)...")
 
                     async def download_one(msg: dict, idx: int) -> tuple[int, str | None, bool]:
-                        async with download_semaphore:
+                        dl_client = await pool.acquire()
+                        try:
                             msg_id = msg["id"]
                             media_type = msg.get("media_type", "unknown")
                             channel_dir = MEDIA_DIR / str(channel_id)
 
                             # For large files with backup, check hash first
                             if backup_path:
-                                hash_result = await client.get_media_hash(
+                                hash_result = await dl_client.get_media_hash(
                                     channel_id, access_hash, msg_id
                                 )
 
@@ -263,7 +263,7 @@ async def sync_history_via_daemon() -> None:
                                             return (idx, path, True)
 
                             # Download full file from Telegram
-                            result = await client.download_media(
+                            result = await dl_client.download_media(
                                 channel_id, access_hash, msg_id,
                                 str(MEDIA_DIR)
                             )
@@ -273,6 +273,8 @@ async def sync_history_via_daemon() -> None:
                             elif result.get("error"):
                                 logger.warning(f"    [msg {msg_id}] {media_type}: download failed - {result['error']}")
                             return (idx, path, False)
+                        finally:
+                            pool.release(dl_client)
 
                     tasks = [download_one(msg, idx) for msg, idx in messages_with_media]
                     results = await asyncio.gather(*tasks, return_exceptions=True)

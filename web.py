@@ -172,6 +172,18 @@ def update_media_settings(channel_id):
     return json.dumps({"success": True})
 
 
+@app.route("/api/group/<group_id:int>/dedup", method="POST")
+def update_group_dedup(group_id):
+    """Update group dedup status."""
+    response.content_type = "application/json"
+    data = request.json
+    dedup = 1 if data.get("dedup") else 0
+    with Database() as db:
+        db.set_group_dedup(group_id, dedup)
+        db.commit()
+    return json.dumps({"success": True})
+
+
 @app.route("/media/<filepath:path>")
 def serve_media(filepath):
     """Serve media files with cache headers."""
@@ -332,6 +344,246 @@ def download_media(channel_id, message_id):
     return json.dumps({"error": "Download failed"})
 
 
+def consolidate_album_messages(messages: list[dict]) -> list[dict]:
+    """Consolidate messages by (channel_id, grouped_id) into albums.
+
+    Messages with the same channel_id and grouped_id are combined into one,
+    with media_items containing all media from the album.
+    """
+    if not messages:
+        return []
+
+    # Group by (channel_id, grouped_id)
+    albums = {}  # key: (channel_id, grouped_id or message_id), value: list of messages
+
+    for msg in messages:
+        ch_id = msg.get("channel_id")
+        grouped_id = msg.get("grouped_id")
+
+        if grouped_id:
+            key = (ch_id, f"g_{grouped_id}")
+        else:
+            key = (ch_id, f"m_{msg['id']}")
+
+        if key not in albums:
+            albums[key] = []
+        albums[key].append(msg)
+
+    # Build consolidated messages
+    result = []
+    for key, album_msgs in albums.items():
+        # Use the first message as the base, sorted by id
+        album_msgs.sort(key=lambda m: m["id"])
+        base = album_msgs[0].copy()
+
+        # Build media_items from all messages in the album
+        media_items = []
+        album_message_ids = []
+        for m in album_msgs:
+            album_message_ids.append(m["id"])
+            if m.get("media_path") or m.get("media_type"):
+                media_items.append({
+                    "path": m.get("media_path"),
+                    "type": m.get("media_type"),
+                    "message_id": m["id"],
+                    "video_thumbnail_path": m.get("video_thumbnail_path")
+                })
+
+        base["media_items"] = media_items
+        base["album_message_ids"] = album_message_ids
+        result.append(base)
+
+    return result
+
+
+def enrich_with_duplicates(messages: list[dict], db) -> list[dict]:
+    """Add duplicate variants to messages.
+
+    For each message that is an "original" (has duplicates pointing to it),
+    adds a 'variants' array containing all versions of the message.
+    Messages that are duplicates themselves get the original + all variants.
+    Albums (grouped_id) are consolidated so each variant is the full album.
+    """
+    if not messages:
+        return messages
+
+    # Build a map of message keys for quick lookup
+    msg_keys = {(m["channel_id"], m["id"]): m for m in messages}
+
+    # Track which messages we've already processed for duplicates
+    processed = set()
+
+    for msg in messages:
+        ch_id = msg["channel_id"]
+        msg_id = msg["id"]
+        key = (ch_id, msg_id)
+
+        if key in processed:
+            continue
+
+        # Check if this message points to an original
+        orig_ch = msg.get("duplicate_of_channel")
+        orig_msg = msg.get("duplicate_of_message")
+
+        if orig_ch and orig_msg:
+            # This is a duplicate - find the original and all siblings
+            original_key = (orig_ch, orig_msg)
+
+            # Get the original message (and its album if applicable)
+            original = db.get_message(orig_ch, orig_msg)
+            if original:
+                # Get channel info for original
+                orig_channel = db.get_channel_by_id(orig_ch)
+                if orig_channel:
+                    original["channel_id"] = orig_ch
+                    original["channel_title"] = orig_channel["title"]
+                    original["channel_username"] = orig_channel.get("username")
+
+                # Get all duplicates - if original is an album, get duplicates for ALL album messages
+                all_dups = []
+                original_msg_ids = [orig_msg]
+                if original.get("grouped_id"):
+                    album_msgs = db.get_album_messages(orig_ch, original["grouped_id"])
+                    original_msg_ids = [m["id"] for m in album_msgs] if album_msgs else [orig_msg]
+
+                seen_dup_ids = set()
+                for orig_id in original_msg_ids:
+                    dups = db.get_message_duplicates(orig_ch, orig_id)
+                    for d in dups:
+                        dup_key = (d["channel_id"], d["id"])
+                        if dup_key not in seen_dup_ids:
+                            seen_dup_ids.add(dup_key)
+                            all_dups.append(d)
+
+                # Consolidate duplicates by album (channel_id + grouped_id)
+                consolidated_dups = consolidate_album_messages(all_dups)
+
+                # Also consolidate original if it's an album
+                original_list = [original]
+                if original.get("grouped_id"):
+                    # Fetch all album messages for original
+                    album_msgs = db.get_album_messages(orig_ch, original["grouped_id"])
+                    if album_msgs:
+                        for am in album_msgs:
+                            am["channel_id"] = orig_ch
+                            am["channel_title"] = orig_channel["title"] if orig_channel else "Unknown"
+                            am["channel_username"] = orig_channel.get("username") if orig_channel else None
+                        original_list = album_msgs
+                consolidated_original = consolidate_album_messages(original_list)
+
+                # Build variants: consolidated original + consolidated duplicates
+                variants = consolidated_original + consolidated_dups
+
+                # Deduplicate variants by (channel_id, first message id)
+                seen_variants = set()
+                unique_variants = []
+                for v in variants:
+                    v_key = (v["channel_id"], v["id"])
+                    if v_key not in seen_variants:
+                        seen_variants.add(v_key)
+                        unique_variants.append(v)
+
+                msg["variants"] = unique_variants
+                processed.add(key)
+                # Mark current message's album IDs as processed
+                if msg.get("album_message_ids"):
+                    for album_id in msg["album_message_ids"]:
+                        processed.add((ch_id, album_id))
+                # Mark original album message IDs as processed
+                for orig_id in original_msg_ids:
+                    processed.add((orig_ch, orig_id))
+                # Also mark all duplicates as processed
+                for v in all_dups:
+                    processed.add((v["channel_id"], v["id"]))
+        else:
+            # This might be an original - check for duplicates
+            # If this is an album, get duplicates for ALL album messages
+            all_msg_ids = [msg_id]
+            if msg.get("album_message_ids"):
+                all_msg_ids = msg["album_message_ids"]
+            elif msg.get("grouped_id"):
+                album_msgs = db.get_album_messages(ch_id, msg["grouped_id"])
+                all_msg_ids = [m["id"] for m in album_msgs] if album_msgs else [msg_id]
+
+            duplicates = []
+            seen_dup_ids = set()
+            for m_id in all_msg_ids:
+                dups = db.get_message_duplicates(ch_id, m_id)
+                for d in dups:
+                    dup_key = (d["channel_id"], d["id"])
+                    if dup_key not in seen_dup_ids:
+                        seen_dup_ids.add(dup_key)
+                        duplicates.append(d)
+
+            if duplicates:
+                # This is an original with duplicates
+                # Build self variant - msg already has media_items from main query
+                self_variant = msg.copy()
+                self_variant["channel_id"] = ch_id
+                if "channel_title" not in self_variant:
+                    channel = db.get_channel_by_id(ch_id)
+                    if channel:
+                        self_variant["channel_title"] = channel["title"]
+                        self_variant["channel_username"] = channel.get("username")
+
+                # Ensure media_items exists on self
+                if "media_items" not in self_variant:
+                    if self_variant.get("media_path") or self_variant.get("media_type"):
+                        self_variant["media_items"] = [{
+                            "path": self_variant.get("media_path"),
+                            "type": self_variant.get("media_type"),
+                            "message_id": self_variant["id"],
+                            "video_thumbnail_path": self_variant.get("video_thumbnail_path")
+                        }]
+                    else:
+                        self_variant["media_items"] = []
+
+                # Consolidate duplicates by album
+                consolidated_dups = consolidate_album_messages(duplicates)
+
+                variants = [self_variant] + consolidated_dups
+
+                # Deduplicate variants by (channel_id, first message id)
+                seen_variants = set()
+                unique_variants = []
+                for v in variants:
+                    v_key = (v["channel_id"], v["id"])
+                    if v_key not in seen_variants:
+                        seen_variants.add(v_key)
+                        unique_variants.append(v)
+
+                msg["variants"] = unique_variants
+                processed.add(key)
+                # Mark current message's album IDs as processed
+                for m_id in all_msg_ids:
+                    processed.add((ch_id, m_id))
+                # Mark duplicates as processed so we don't show them separately
+                for d in duplicates:
+                    processed.add((d["channel_id"], d["id"]))
+
+    # Filter out messages that are duplicates shown elsewhere
+    # (keep only originals and messages without duplicates)
+    result = []
+    seen_duplicate_keys = set()
+    for msg in messages:
+        key = (msg["channel_id"], msg["id"])
+        # If this message has variants, it's the "primary" - keep it
+        if msg.get("variants"):
+            result.append(msg)
+            # Mark all variant keys as seen (including all album message IDs)
+            for v in msg["variants"]:
+                seen_duplicate_keys.add((v["channel_id"], v["id"]))
+                # Also mark all album message IDs if present
+                if v.get("album_message_ids"):
+                    for album_msg_id in v["album_message_ids"]:
+                        seen_duplicate_keys.add((v["channel_id"], album_msg_id))
+        elif key not in seen_duplicate_keys:
+            # This message has no variants and isn't a duplicate shown elsewhere
+            result.append(msg)
+
+    return result
+
+
 @app.route("/api/group/<group_id:int>/messages")
 def get_group_messages(group_id):
     """Get unread messages for a group, optionally filtered to a single channel."""
@@ -341,6 +593,7 @@ def get_group_messages(group_id):
     channel_id = int(channel_id) if channel_id else None
     with Database() as db:
         messages = db.get_unread_messages_by_group(group_id, limit, channel_id)
+        messages = enrich_with_duplicates(messages, db)
         return json.dumps(messages)
 
 
@@ -356,6 +609,7 @@ def get_earlier_messages(group_id):
         return json.dumps([])
     with Database() as db:
         messages = db.get_earlier_messages_by_group(group_id, before_date, limit, channel_id)
+        messages = enrich_with_duplicates(messages, db)
         return json.dumps(messages)
 
 
@@ -366,6 +620,7 @@ def get_oldest_messages(channel_id):
     limit = int(request.query.get("limit", 50))
     with Database() as db:
         messages = db.get_oldest_messages(channel_id, limit)
+        messages = enrich_with_duplicates(messages, db)
         return json.dumps(messages)
 
 
@@ -379,6 +634,7 @@ def get_later_messages(channel_id):
         return json.dumps([])
     with Database() as db:
         messages = db.get_later_messages(channel_id, after_date, limit)
+        messages = enrich_with_duplicates(messages, db)
         return json.dumps(messages)
 
 
@@ -450,6 +706,20 @@ def anchor_message():
     return json.dumps({"success": True})
 
 
+@app.route("/api/message/hide", method="POST")
+def hide_message():
+    """Set message hidden status."""
+    response.content_type = "application/json"
+    data = request.json
+    channel_id = int(data.get("channel_id"))
+    message_id = int(data.get("message_id"))
+    hidden = int(data.get("hidden", 0))  # 0 or 1
+    with Database() as db:
+        db.update_message_hidden(channel_id, message_id, hidden)
+        db.commit()
+    return json.dumps({"success": True})
+
+
 @app.route("/api/channel/<channel_id:int>/anchors")
 def get_channel_anchors(channel_id):
     """Get all anchored messages for a channel."""
@@ -478,6 +748,7 @@ def get_bookmarks():
     limit = int(request.query.get("limit", 100))
     with Database() as db:
         messages = db.get_all_bookmarked_messages(limit)
+        messages = enrich_with_duplicates(messages, db)
         return json.dumps(messages)
 
 
@@ -520,7 +791,8 @@ def search_messages():
         stats = db.get_search_index_stats()
         logger.info(f"[search] Query: '{query}', Index stats: {stats}")
 
-        results = db.search_messages(query, limit, channel_id, group_id)
+        # Fetch more results than needed to allow sorting by date
+        results = db.search_messages(query, limit * 3, channel_id, group_id)
         logger.info(f"[search] Found {len(results)} results")
 
         # Fetch full message data for each result
@@ -528,6 +800,9 @@ def search_messages():
         for result in results:
             msg = db.get_message(result["channel_id"], result["message_id"])
             if msg:
+                # Skip hidden messages
+                if msg.get("hidden") == 1:
+                    continue
                 msg["channel_title"] = result["channel_title"]
                 msg["channel_username"] = result.get("channel_username")
                 msg["channel_id"] = result["channel_id"]
@@ -545,6 +820,10 @@ def search_messages():
                 msg["is_album"] = False
                 msg["album_message_ids"] = [msg["id"]]
                 enriched_results.append(msg)
+
+        # Sort by date descending (most recent first) and limit
+        enriched_results.sort(key=lambda m: m.get("date") or 0, reverse=True)
+        enriched_results = enriched_results[:limit]
 
         return json.dumps({"results": enriched_results, "query": query})
 

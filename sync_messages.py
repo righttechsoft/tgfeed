@@ -21,7 +21,7 @@ def check_pause():
         while PAUSE_FILE.exists():
             time.sleep(0.5)
         logger.info("Pause released, resuming")
-from tg_client import TGClient, TGClientConnectionError, TGFloodWaitError, is_daemon_running
+from tg_client import TGClient, TGClientPool, TGClientConnectionError, TGFloodWaitError, is_daemon_running
 
 # Configure logging with UTF-8 support for Windows
 import io
@@ -88,11 +88,9 @@ async def sync_messages_via_daemon() -> None:
 
     logger.info(f"Found {len(channels)} active channels")
 
-    async with TGClient() as client:
+    async with TGClient() as client, TGClientPool(size=CONCURRENT_DOWNLOADS) as pool:
         status = await client.ping()
         logger.info(f"Connected to daemon (clients: {status['clients']})")
-
-        download_semaphore = asyncio.Semaphore(CONCURRENT_DOWNLOADS)
 
         for channel in channels:
             check_pause()  # Allow webui to interrupt
@@ -144,24 +142,27 @@ async def sync_messages_via_daemon() -> None:
                     logger.info(f"  Fetched {len(raw_messages)} messages, downloading media...")
 
                     # Phase 2: Download media concurrently (respecting media settings)
-                    async def download_with_semaphore(msg: dict) -> tuple[int, str | None, bool]:
+                    async def download_with_pool(msg: dict) -> tuple[int, str | None, bool]:
                         """Returns (msg_id, path, was_skipped_by_settings)"""
-                        async with download_semaphore:
-                            if not msg.get("has_media") or msg.get("is_poll"):
-                                return (msg["id"], None, False)
-                            # Check if we should download this media type
-                            if not should_download_media(msg.get("media_type"), media_settings):
-                                return (msg["id"], None, True)  # Skipped by settings
+                        if not msg.get("has_media") or msg.get("is_poll"):
+                            return (msg["id"], None, False)
+                        # Check if we should download this media type
+                        if not should_download_media(msg.get("media_type"), media_settings):
+                            return (msg["id"], None, True)  # Skipped by settings
+                        dl_client = await pool.acquire()
+                        try:
                             # Pass MEDIA_DIR - daemon adds channel_id subfolder
-                            result = await client.download_media(
+                            result = await dl_client.download_media(
                                 channel_id, access_hash, msg["id"], str(MEDIA_DIR)
                             )
                             path = result.get("path")
                             if path:
                                 logger.info(f"    Downloaded media: {path}")
                             return (msg["id"], path, False)
+                        finally:
+                            pool.release(dl_client)
 
-                    tasks = [download_with_semaphore(msg) for msg in raw_messages]
+                    tasks = [download_with_pool(msg) for msg in raw_messages]
                     results = await asyncio.gather(*tasks, return_exceptions=True)
 
                     media_paths = {}

@@ -9,7 +9,10 @@ tgfeed/
 ├── config.py              # Configuration from .env (API keys, paths, daemon settings)
 ├── database.py            # SQLite database operations and migrations
 ├── tg_daemon.py           # Centralized Telegram connection daemon (RPC server)
-├── tg_client.py           # RPC client for communicating with tg_daemon
+├── tg_client.py           # RPC client and connection pool for communicating with tg_daemon
+├── ai_providers/          # LLM API providers for content deduplication
+│   ├── cerebras.py        # Cerebras API provider
+│   └── mistral.py         # Mistral API provider
 ├── sync_channels.py       # Downloads channel list from Telegram
 ├── sync_messages.py       # Downloads messages from active channels
 ├── sync_history.py        # Downloads historical messages (backward sync)
@@ -53,8 +56,8 @@ Stores Telegram channel metadata:
 - `participants_count` - Number of subscribers
 - `broadcast`, `megagroup` - Channel type flags
 - `verified`, `restricted`, `scam`, `fake` - Channel status flags
-- `subscribed` - 1 if channel exists in user's Telegram
-- `active` - 1 if messages should be downloaded (user toggle)
+- `subscribed` - 1 if channel exists in user's Telegram (tracked by sync_channels, not used for filtering)
+- `active` - 1 if messages should be downloaded (user toggle, primary filter for all queries)
 - `group_id` - FK to groups table for organizing channels
 - `download_all` - 1 to download full history (backward sync)
 - `last_active` - Timestamp of last new message download
@@ -68,6 +71,7 @@ Stores Telegram channel metadata:
 User-defined groups for organizing channels:
 - `id` (INTEGER PRIMARY KEY)
 - `name` (TEXT)
+- `dedup` (INTEGER DEFAULT 0) - 1 to enable content deduplication for channels in this group
 
 ### `tg_creds` table
 Telegram API credentials for daemon (supports multiple accounts):
@@ -80,6 +84,14 @@ Telegram API credentials for daemon (supports multiple accounts):
 ### `content_hashes` table
 For LLM-based content deduplication:
 - `hash` (TEXT PRIMARY KEY) - Hash of LLM-generated summary
+- `channel_id` (INTEGER)
+- `message_id` (INTEGER)
+- `message_date` (INTEGER)
+- `created_at` (INTEGER)
+
+### `media_hashes` table
+For media attachment deduplication:
+- `hash` (TEXT PRIMARY KEY) - SHA256 hash of media content(s)
 - `channel_id` (INTEGER)
 - `message_id` (INTEGER)
 - `message_date` (INTEGER)
@@ -130,6 +142,7 @@ One table per channel for messages. Created on first sync.
 - `rating` - -1 (dislike), 0 (none), 1 (like)
 - `bookmarked` - 1 if saved
 - `anchored` - 1 if anchored (for channel navigation gallery)
+- `hidden` - 1 if hidden from feed (excluded from all message queries)
 - `html_downloaded` - 1 if telegra.ph page has been downloaded
 - `created_at` - When message was added to database
 
@@ -137,6 +150,8 @@ One table per channel for messages. Created on first sync.
 - `ai_summary` - LLM-generated summary of message content
 - `content_hash` - Hash of the AI summary for duplicate detection
 - `content_hash_pending` - 1 if needs processing, -1 if skipped, 0 if done
+- `media_hash` - SHA256 hash of media attachment(s) for duplicate detection
+- `media_hash_pending` - 1 if needs processing, -1 if skipped (no media), 0 if done
 - `duplicate_of_channel` - Channel ID of original message (if duplicate)
 - `duplicate_of_message` - Message ID of original message (if duplicate)
 
@@ -145,7 +160,9 @@ One table per channel for messages. Created on first sync.
 - `idx_channel_{id}_read_date` - Composite for unread queries
 - `idx_channel_{id}_bookmarked` - For bookmark queries
 - `idx_channel_{id}_anchored` - For anchor gallery queries
-- `idx_channel_{id}_content_hash` - For duplicate detection
+- `idx_channel_{id}_content_hash` - For text duplicate detection
+- `idx_channel_{id}_media_hash` - For media duplicate detection
+- `idx_channel_{id}_hidden` - For hidden message filtering
 
 ## Architecture
 
@@ -172,6 +189,8 @@ Async client library for communicating with tg_daemon:
 - Connection management with automatic reconnection
 - Error handling (TGClientError, TGFloodWaitError)
 - `is_daemon_running()` helper to check if daemon is available
+- `TGClientPool` - connection pool for concurrent RPC calls (each `TGClient` serializes
+  calls via `asyncio.Lock`, so the pool creates N connections for true N-way concurrency)
 
 ## Sync Logic
 
@@ -180,12 +199,13 @@ Async client library for communicating with tg_daemon:
 2. Iterates all dialogs, filters broadcast channels
 3. Downloads channel profile photos to data/photos/
 4. Upserts channels to database (preserves active/group/backup_path settings)
-5. Marks removed channels as unsubscribed
+5. Marks removed channels as unsubscribed (sets `subscribed=0`, but this doesn't affect
+   message queries - all filtering uses `active` flag only)
 
 ### sync_messages.py
 
 **Forward sync (new messages):**
-1. For each channel with `active=1`:
+1. For each active channel (`active=1`):
    - Get `latest_id` from database
    - If no messages: download only the latest message (first sync)
    - Otherwise: download all messages newer than `latest_id`
@@ -196,8 +216,13 @@ Async client library for communicating with tg_daemon:
    - If media download fails: set `media_pending=1`
    - Update `last_active` timestamp if new messages found
 
-2. After forward sync, retry pending media downloads (up to 5 per channel):
+2. After forward sync, retry pending media downloads (up to 10 per channel):
    - Query messages with `media_pending=1` and `media_path IS NULL`
+
+**Concurrent downloads via daemon:**
+- Uses `TGClientPool(size=5)` for 5 truly concurrent media downloads
+- Single `TGClient` used for sequential operations (iter_messages, etc.)
+- Direct Telethon fallback uses `asyncio.Semaphore(5)` (Telethon handles concurrency internally)
 
 **Media type mapping:**
 - `photo` -> `download_images` flag
@@ -217,11 +242,11 @@ Async client library for communicating with tg_daemon:
 **Backward sync (full history download):**
 Runs in a continuous loop with 60-second pause between runs.
 
-1. For each channel with `download_all=1`:
+1. For each active channel with `download_all=1`:
    - Get `oldest_id` from database
-   - Download batch of messages older than `oldest_id`
+   - Download batch of 10 messages older than `oldest_id`
    - Mark as `read=1` (historical messages)
-   - Download media concurrently (configurable concurrency)
+   - Download media concurrently via `TGClientPool(size=5)`
    - Repeats each sync run until reaching message ID 1
 
 **Backup media recovery:**
@@ -257,12 +282,24 @@ Creates video thumbnails using ffmpeg:
 4. Updates `video_thumbnail_path` in database
 
 ### generate_content_hashes.py
-LLM-based content deduplication using Claude API:
-1. Queries messages without content hash (min length configurable)
-2. Sends message text to Claude for normalization/summarization
-3. Hashes the normalized summary
+Two-pronged deduplication approach. Only processes channels in groups with `dedup=1`.
+Only processes **unread** messages (`read = 0 OR read IS NULL`).
+
+**Text-based deduplication (requires Mistral API):**
+1. Queries unread messages without content hash (min length configurable)
+2. Sends message text to Mistral for keyword extraction
+3. Hashes the normalized keywords
 4. Stores hash in message table and registers in `content_hashes` lookup table
 5. If hash already exists, marks message as duplicate of the original
+
+**Media-based deduplication:**
+1. Queries messages with downloaded media that need hashing
+2. For single media: computes SHA256 of file content
+3. For albums (grouped_id): collects all media files, sorts by path, concatenates hashes
+4. Stores hash in message table and registers in `media_hashes` lookup table
+5. If hash already exists, marks message as duplicate of the original
+
+A message is marked as duplicate if EITHER text hash OR media hash matches an existing message.
 
 ### index_search.py
 Full-text search indexing using SQLite FTS5:
@@ -313,7 +350,9 @@ Bottle framework with Waitress server (multi-threaded for concurrent requests).
 - `POST /api/message/rate` - Set rating (-1, 0, 1)
 - `POST /api/message/bookmark` - Toggle bookmark
 - `POST /api/message/anchor` - Toggle anchor status
+- `POST /api/message/hide` - Toggle message hidden status
 - `GET /api/channel/{id}/anchors` - Get anchored messages for channel (for gallery)
+- `POST /api/group/{id}/dedup` - Toggle deduplication for a group
 
 **Static file routes:**
 - `/media/{path}` - Message media (1 year cache, immutable)
@@ -350,7 +389,8 @@ Single-page app with vanilla JavaScript. No build step.
 - Results show matching messages with highlighted snippets
 - Can search within current group or across all channels
 
-*Channel management (sidebar):*
+*Channel management (sidebar - Channels tab):*
+- Channels grouped by their assigned group, with collapsible group headers
 - Active toggle - enable/disable message downloading
 - "All" checkbox - enable full history download
 - Media type toggles (visible when active but not "All"):
@@ -360,6 +400,10 @@ Single-page app with vanilla JavaScript. No build step.
 - Group dropdown - assign channel to group
 - Stats: unread count, bookmarks, likes/dislikes
 
+*Group management (sidebar - Groups tab):*
+- Create/rename/delete groups
+- Dedup checkbox per group - enable content deduplication for channels in that group
+
 *Message display:*
 - Message cards with channel icon, title, date, text, media
 - Clickable timestamps link to original message on Telegram (t.me)
@@ -367,7 +411,10 @@ Single-page app with vanilla JavaScript. No build step.
 - Reply quotes: fetches and displays replied-to message with full media
 - Entity rendering: Bold, italic, links, code blocks
 - Handles UTF-16 offsets for emoji in entity positions
-- Duplicate indicator for content detected as similar to earlier messages
+- Duplicate carousel: messages with duplicates show a swipeable carousel of all variants
+  - Albums (grouped_id) are consolidated so each variant shows the complete album
+  - All variant messages are marked as read when scrolling past the carousel
+- Hide button: hides messages from feed (grayed out, excluded from queries on refresh)
 
 *Embedded content:*
 - YouTube videos: detected from URLs, embedded as iframes
@@ -389,6 +436,7 @@ Single-page app with vanilla JavaScript. No build step.
 - Jump to oldest button (↑) - appears when channel is filtered, jumps to first message
 - Rating buttons (thumbs up/down)
 - Bookmark button
+- Hide button - hides message from feed
 - Anchor button (only in single channel view) - marks message for navigation gallery
 - Scroll-based read tracking with IntersectionObserver
 
@@ -527,7 +575,7 @@ uv run python cleanup.py              # Clean up old messages
 
 Migrations run automatically on sync. The `DatabaseMigration` class:
 1. Creates `channels` table if not exists
-2. Creates `groups` table if not exists
+2. Creates `groups` table if not exists (with `dedup` column)
 3. Creates `tg_creds` table for daemon credentials
 4. Creates `content_hashes` table for deduplication
 5. Creates `messages_fts` FTS5 table for full-text search
@@ -537,6 +585,7 @@ Migrations run automatically on sync. The `DatabaseMigration` class:
    - `html_downloaded`, `media_pending`, `video_thumbnail_path`
    - `read_synced_to_tg`, `ai_summary`, `content_hash`, `content_hash_pending`
    - `duplicate_of_channel`, `duplicate_of_message`
+   - `hidden`
 8. Creates indexes for efficient queries
 
 The `create_channel_messages_table()` method also handles migrations for individual channel tables, ensuring columns exist before creating indexes.
