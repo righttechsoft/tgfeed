@@ -133,6 +133,7 @@ def generate_media_hashes() -> tuple[int, int, int]:
     for channel in channels:
         channel_id = channel["id"]
         channel_title = channel["title"]
+        group_id = channel["group_id"]
 
         # First, skip messages without media
         with Database() as db:
@@ -217,7 +218,8 @@ def generate_media_hashes() -> tuple[int, int, int]:
             # Check for duplicate and register
             with Database() as db:
                 original = db.register_media_hash(
-                    media_hash, channel_id, album_msg_ids[0], msg_date
+                    media_hash, channel_id, album_msg_ids[0], msg_date,
+                    group_id=group_id
                 )
 
                 if original:
@@ -257,6 +259,10 @@ def generate_text_hashes(ai_provider: AIProvider) -> tuple[int, int, int, int]:
     # Get channels with dedup enabled
     with Database() as db:
         channels = [dict(row) for row in db.get_dedup_channels()]
+        exclusion_groups = db.get_all_tag_exclusions()
+
+    if exclusion_groups:
+        logger.info(f"Loaded {len(exclusion_groups)} tag exclusion groups")
 
     if not channels:
         logger.info("No channels with dedup enabled")
@@ -267,6 +273,7 @@ def generate_text_hashes(ai_provider: AIProvider) -> tuple[int, int, int, int]:
     for channel in channels:
         channel_id = channel["id"]
         channel_title = channel["title"]
+        group_id = channel["group_id"]
 
         # First, skip messages that are too short
         with Database() as db:
@@ -336,10 +343,26 @@ def generate_text_hashes(ai_provider: AIProvider) -> tuple[int, int, int, int]:
             # Compute hash from the AI summary
             content_hash = compute_hash(ai_summary)
 
+            # Check tag exclusions - auto-mark as read if matched
+            if exclusion_groups and Database.check_tag_exclusions(ai_summary, exclusion_groups):
+                with Database() as db:
+                    now = int(time.time())
+                    cursor = db.cursor()
+                    cursor.execute(
+                        f"UPDATE channel_{channel_id} SET read = 1, read_at = ? WHERE id = ? AND read = 0",
+                        (now, msg["id"])
+                    )
+                    db.update_content_hash(channel_id, msg["id"], content_hash, ai_summary)
+                    db.commit()
+                logger.info(f"  Auto-excluded (tag match): msg {msg['id']}")
+                total_skipped += 1
+                continue
+
             # Check for duplicates and register
             with Database() as db:
                 original = db.register_content_hash(
-                    content_hash, channel_id, msg["id"], msg["date"]
+                    content_hash, channel_id, msg["id"], msg["date"],
+                    group_id=group_id
                 )
 
                 if original:

@@ -100,6 +100,9 @@ class DatabaseMigration:
         # Create tg_creds table for Telegram daemon
         self._create_tg_creds_table(cursor)
 
+        # Create tag_exclusions table for tag-based message exclusion
+        self._create_tag_exclusions_table(cursor)
+
         # Create FTS5 table for full-text search
         self._create_fts_table(cursor)
 
@@ -117,26 +120,44 @@ class DatabaseMigration:
 
     def _create_content_hashes_table(self, cursor) -> None:
         """Create the content_hashes lookup table if it doesn't exist."""
+        # Migrate from old schema (hash TEXT PRIMARY KEY) to new (hash + group_id)
+        cursor.execute("PRAGMA table_info(content_hashes)")
+        cols = {row[1] for row in cursor.fetchall()}
+        if cols and "group_id" not in cols:
+            logger.info("Migrating content_hashes table to add group_id...")
+            cursor.execute("DROP TABLE content_hashes")
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS content_hashes (
-                hash TEXT PRIMARY KEY,
+                hash TEXT NOT NULL,
+                group_id INTEGER NOT NULL,
                 channel_id INTEGER NOT NULL,
                 message_id INTEGER NOT NULL,
                 message_date INTEGER,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (hash, group_id)
             )
         """)
         self._create_index_if_not_exists(cursor, "content_hashes", "date", ["message_date"])
 
     def _create_media_hashes_table(self, cursor) -> None:
         """Create the media_hashes lookup table if it doesn't exist."""
+        # Migrate from old schema (hash TEXT PRIMARY KEY) to new (hash + group_id)
+        cursor.execute("PRAGMA table_info(media_hashes)")
+        cols = {row[1] for row in cursor.fetchall()}
+        if cols and "group_id" not in cols:
+            logger.info("Migrating media_hashes table to add group_id...")
+            cursor.execute("DROP TABLE media_hashes")
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS media_hashes (
-                hash TEXT PRIMARY KEY,
+                hash TEXT NOT NULL,
+                group_id INTEGER NOT NULL,
                 channel_id INTEGER NOT NULL,
                 message_id INTEGER NOT NULL,
                 message_date INTEGER,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (hash, group_id)
             )
         """)
         self._create_index_if_not_exists(cursor, "media_hashes", "date", ["message_date"])
@@ -188,6 +209,16 @@ class DatabaseMigration:
             )
         """)
 
+    def _create_tag_exclusions_table(self, cursor) -> None:
+        """Create the tag_exclusions table if it doesn't exist."""
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tag_exclusions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tags TEXT NOT NULL UNIQUE,
+                created_at INTEGER NOT NULL
+            )
+        """)
+
     def _create_fts_table(self, cursor) -> None:
         """Create FTS5 virtual table for full-text search with trigram tokenizer."""
         # Check if FTS5 table already exists
@@ -215,8 +246,54 @@ class DatabaseMigration:
         logger.info("Created FTS5 search index table")
 
 
+class _DebugCursor:
+    """Wrapper around sqlite3.Cursor that logs queries and execution time."""
+
+    def __init__(self, cursor: sqlite3.Cursor):
+        self._cursor = cursor
+
+    def execute(self, sql, parameters=()):
+        short = sql.strip().replace('\n', ' ')
+        short = ' '.join(short.split())[:200]
+        start = time.perf_counter()
+        result = self._cursor.execute(sql, parameters)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        logger.info(f"[SQL {elapsed_ms:.1f}ms] {short}")
+        return self
+
+    def executemany(self, sql, seq_of_parameters):
+        short = sql.strip().replace('\n', ' ')
+        short = ' '.join(short.split())[:200]
+        start = time.perf_counter()
+        result = self._cursor.executemany(sql, seq_of_parameters)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        logger.info(f"[SQL {elapsed_ms:.1f}ms] {short}")
+        return self
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    @property
+    def lastrowid(self):
+        return self._cursor.lastrowid
+
+    @property
+    def description(self):
+        return self._cursor.description
+
+
 class Database:
     """Database connection and operations."""
+
+    # Set to True to log all SQL queries with execution time
+    DEBUG_QUERIES = False
 
     def __init__(self, db_path=None) -> None:
         self.db_path = db_path or DATABASE_PATH
@@ -235,27 +312,34 @@ class Database:
         if self.conn:
             self.conn.close()
 
+    def cursor(self) -> "_DebugCursor | sqlite3.Cursor":
+        """Return a cursor, optionally wrapped for debug logging."""
+        c = self.conn.cursor()
+        if self.DEBUG_QUERIES:
+            return _DebugCursor(c)
+        return c
+
     def get_subscribed_channel_ids(self) -> set[int]:
         """Get all channel IDs currently marked as subscribed."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("SELECT id FROM channels WHERE subscribed = 1")
         return {row[0] for row in cursor.fetchall()}
 
     def get_subscribed_channels(self) -> list[sqlite3.Row]:
         """Get all channels currently marked as subscribed."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("SELECT * FROM channels WHERE subscribed = 1")
         return cursor.fetchall()
 
     def get_active_channels(self) -> list[sqlite3.Row]:
         """Get all channels marked as active for message downloading."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("SELECT * FROM channels WHERE active = 1")
         return cursor.fetchall()
 
     def get_dedup_channels(self) -> list[sqlite3.Row]:
         """Get all channels in groups with deduplication enabled."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("""
             SELECT c.* FROM channels c
             JOIN groups g ON c.group_id = g.id
@@ -265,13 +349,13 @@ class Database:
 
     def set_group_dedup(self, group_id: int, dedup: int) -> None:
         """Set the dedup flag for a group (0 or 1)."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("UPDATE groups SET dedup = ? WHERE id = ?", (dedup, group_id))
 
     def create_channel_messages_table(self, channel_id: int) -> None:
         """Create a messages table for a specific channel if it doesn't exist."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS {table_name} (
                 id INTEGER PRIMARY KEY,
@@ -330,7 +414,7 @@ class Database:
     def get_latest_message_id(self, channel_id: int) -> int | None:
         """Get the latest message ID for a channel, or None if no messages."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"SELECT MAX(id) FROM {table_name}")
             result = cursor.fetchone()
@@ -341,7 +425,7 @@ class Database:
     def get_oldest_message_id(self, channel_id: int) -> int | None:
         """Get the oldest message ID for a channel, or None if no messages."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"SELECT MIN(id) FROM {table_name}")
             result = cursor.fetchone()
@@ -352,7 +436,7 @@ class Database:
     def insert_message(self, channel_id: int, data: dict) -> None:
         """Insert a message into the channel's messages table."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute(f"""
             INSERT OR IGNORE INTO {table_name} (
                 id, date, message, entities, out, mentioned, media_unread, silent, post,
@@ -376,7 +460,7 @@ class Database:
         if not messages:
             return 0
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         values = [(
             d["id"], d["date"], d["message"], d["entities"], d.get("out", 0),
             d.get("mentioned", 0), d.get("media_unread", 0), d.get("silent", 0), d.get("post", 0),
@@ -401,7 +485,7 @@ class Database:
     def get_messages_with_pending_media(self, channel_id: int, limit: int = 10) -> list[dict]:
         """Get messages that have pending media downloads."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"""
                 SELECT id, media_type FROM {table_name}
@@ -416,7 +500,7 @@ class Database:
     def update_message_media(self, channel_id: int, message_id: int, media_path: str | None, media_pending: int = 0) -> None:
         """Update media path and pending status for a message."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"""
                 UPDATE {table_name} SET media_path = ?, media_pending = ? WHERE id = ?
@@ -427,7 +511,7 @@ class Database:
     def get_videos_without_thumbnails(self, channel_id: int, limit: int = 10) -> list[dict]:
         """Get video messages that don't have thumbnails, newest first."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"""
                 SELECT id, media_path FROM {table_name}
@@ -444,7 +528,7 @@ class Database:
     def update_video_thumbnail(self, channel_id: int, message_id: int, thumbnail_path: str) -> None:
         """Set the thumbnail path for a video message."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"""
                 UPDATE {table_name} SET video_thumbnail_path = ? WHERE id = ?
@@ -454,7 +538,7 @@ class Database:
 
     def upsert_channel(self, data: dict) -> bool:
         """Insert or update a channel. Returns True if inserted, False if updated."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("SELECT id FROM channels WHERE id = ?", (data["id"],))
         exists = cursor.fetchone() is not None
 
@@ -492,7 +576,7 @@ class Database:
         """Mark channels as unsubscribed. Returns count of affected rows."""
         if not channel_ids:
             return 0
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         placeholders = ",".join("?" * len(channel_ids))
         cursor.execute(f"""
             UPDATE channels SET subscribed = 0, updated_at = ?
@@ -508,7 +592,7 @@ class Database:
 
     def get_all_channels_with_groups(self) -> list[sqlite3.Row]:
         """Get all channels with their group info."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("""
             SELECT c.*, g.name as group_name
             FROM channels c
@@ -519,30 +603,30 @@ class Database:
 
     def get_all_groups(self) -> list[sqlite3.Row]:
         """Get all groups."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("SELECT * FROM groups ORDER BY name")
         return cursor.fetchall()
 
     def create_group(self, name: str) -> int:
         """Create a new group and return its ID."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("INSERT INTO groups (name) VALUES (?)", (name,))
         return cursor.lastrowid
 
     def rename_group(self, group_id: int, name: str) -> None:
         """Rename a group."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("UPDATE groups SET name = ? WHERE id = ?", (name, group_id))
 
     def delete_group(self, group_id: int) -> None:
         """Delete a group and unassign all its channels."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("UPDATE channels SET group_id = NULL WHERE group_id = ?", (group_id,))
         cursor.execute("DELETE FROM groups WHERE id = ?", (group_id,))
 
     def get_group_channel_count(self, group_id: int) -> int:
         """Get the number of channels in a group."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute(
             "SELECT COUNT(*) FROM channels WHERE group_id = ?",
             (group_id,)
@@ -551,7 +635,7 @@ class Database:
 
     def update_channel_active(self, channel_id: int, active: int) -> None:
         """Update channel active status."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute(
             "UPDATE channels SET active = ? WHERE id = ?",
             (active, channel_id)
@@ -559,7 +643,7 @@ class Database:
 
     def update_channel_last_active(self, channel_id: int, timestamp: int) -> None:
         """Update channel last_active timestamp."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute(
             "UPDATE channels SET last_active = ? WHERE id = ?",
             (timestamp, channel_id)
@@ -567,7 +651,7 @@ class Database:
 
     def update_channel_group(self, channel_id: int, group_id: int | None) -> None:
         """Update channel group."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute(
             "UPDATE channels SET group_id = ? WHERE id = ?",
             (group_id, channel_id)
@@ -575,7 +659,7 @@ class Database:
 
     def update_channel_download_all(self, channel_id: int, download_all: int) -> None:
         """Update channel download_all status."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute(
             "UPDATE channels SET download_all = ? WHERE id = ?",
             (download_all, channel_id)
@@ -583,7 +667,7 @@ class Database:
 
     def update_channel_backup_path(self, channel_id: int, backup_path: str | None) -> None:
         """Update channel backup_path for local media lookup."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute(
             "UPDATE channels SET backup_path = ? WHERE id = ?",
             (backup_path, channel_id)
@@ -592,7 +676,7 @@ class Database:
     def update_channel_media_settings(self, channel_id: int, images: int, videos: int,
                                        audio: int, other: int) -> None:
         """Update channel media download settings."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("""
             UPDATE channels SET
                 download_images = ?, download_videos = ?,
@@ -602,7 +686,7 @@ class Database:
 
     def get_channel_media_settings(self, channel_id: int) -> dict:
         """Get channel media download settings."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("""
             SELECT download_images, download_videos, download_audio, download_other,
                    download_all
@@ -622,32 +706,61 @@ class Database:
 
     def get_channel_by_id(self, channel_id: int) -> dict | None:
         """Get a channel by ID."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("SELECT * FROM channels WHERE id = ?", (channel_id,))
         row = cursor.fetchone()
         return dict(row) if row else None
 
     def get_channel_backup_path(self, channel_id: int) -> str | None:
         """Get the backup_path for a channel."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("SELECT backup_path FROM channels WHERE id = ?", (channel_id,))
         row = cursor.fetchone()
         return row[0] if row else None
 
     def get_download_all_channels(self) -> list[sqlite3.Row]:
         """Get all channels with download_all enabled."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("SELECT * FROM channels WHERE active = 1 AND download_all = 1")
         return cursor.fetchall()
 
     def get_channels_by_group(self, group_id: int) -> list[sqlite3.Row]:
         """Get all channels in a group."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute(
             "SELECT * FROM channels WHERE group_id = ?",
             (group_id,)
         )
         return cursor.fetchall()
+
+    def get_group_tag_counts(self, group_id: int) -> dict[str, int]:
+        """Count how many unread messages in the group contain each AI tag.
+
+        Returns dict of lowercase tag -> message count.
+        """
+        channels = self.get_channels_by_group(group_id)
+        channels = [c for c in channels if c["active"] == 1]
+
+        tag_counts: dict[str, int] = {}
+        cursor = self.cursor()
+        for channel in channels:
+            table_name = f"channel_{channel['id']}"
+            try:
+                cursor.execute(f"""
+                    SELECT ai_summary FROM {table_name}
+                    WHERE ai_summary IS NOT NULL
+                      AND (read = 0 OR read IS NULL)
+                      AND (hidden = 0 OR hidden IS NULL)
+                """)
+                for row in cursor.fetchall():
+                    for tag in row[0].split(','):
+                        tag = tag.strip().lower()
+                        if tag:
+                            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+            except sqlite3.Error:
+                pass
+
+        return tag_counts
 
     def get_unread_messages_by_group(self, group_id: int, limit: int = 100, channel_id: int | None = None) -> list[dict]:
         """Get unread messages from all active channels in a group, sorted by date."""
@@ -664,7 +777,7 @@ class Database:
                 return []
 
         raw_messages = []
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         for channel in channels:
             ch_id = channel["id"]
             table_name = f"channel_{ch_id}"
@@ -699,7 +812,7 @@ class Database:
                 return []
 
         raw_messages = []
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         for channel in channels:
             ch_id = channel["id"]
             table_name = f"channel_{ch_id}"
@@ -721,7 +834,7 @@ class Database:
 
     def get_oldest_messages(self, channel_id: int, limit: int = 50) -> list[dict]:
         """Get the oldest messages for a channel, ordered oldest first."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("SELECT title, username FROM channels WHERE id = ?", (channel_id,))
         row = cursor.fetchone()
         if not row:
@@ -748,7 +861,7 @@ class Database:
 
     def get_later_messages(self, channel_id: int, after_date: int, limit: int = 50) -> list[dict]:
         """Get messages newer than after_date for a channel, ordered oldest first."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("SELECT title, username FROM channels WHERE id = ?", (channel_id,))
         row = cursor.fetchone()
         if not row:
@@ -858,7 +971,7 @@ class Database:
     def mark_message_read(self, channel_id: int, message_id: int) -> None:
         """Mark a message as read."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"UPDATE {table_name} SET read = 1 WHERE id = ?", (message_id,))
         except sqlite3.Error:
@@ -867,7 +980,7 @@ class Database:
     def get_message(self, channel_id: int, message_id: int) -> dict | None:
         """Get a single message by channel and message ID."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"SELECT * FROM {table_name} WHERE id = ?", (message_id,))
             row = cursor.fetchone()
@@ -879,28 +992,30 @@ class Database:
     def get_message_duplicates(self, channel_id: int, message_id: int) -> list[dict]:
         """Get all messages that are duplicates of the given message.
 
-        Searches all channel tables for messages where duplicate_of_channel/message
-        points to this message. Also includes this message's duplicate_of target if any.
-
+        Only searches channels in the same group as the given channel.
         Returns list of dicts with channel_id, message_id, channel_title, and full message data.
         """
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
 
-        # Get all channel tables
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'channel_%'")
-        tables = [row[0] for row in cursor.fetchall() if not row[0].startswith("channel_backup_hash_")]
+        # Get the group_id for this channel
+        cursor.execute("SELECT group_id FROM channels WHERE id = ?", (channel_id,))
+        row = cursor.fetchone()
+        if not row or not row[0]:
+            return []
+        group_id = row[0]
 
-        # Get channel info
-        cursor.execute("SELECT id, title, username FROM channels")
-        channel_info = {row[0]: {"title": row[1], "username": row[2]} for row in cursor.fetchall()}
+        # Get channels in the same group
+        cursor.execute(
+            "SELECT id, title, username FROM channels WHERE group_id = ?",
+            (group_id,)
+        )
+        group_channels = {r[0]: {"title": r[1], "username": r[2]} for r in cursor.fetchall()}
 
         duplicates = []
 
-        for table_name in tables:
+        for ch_id, info in group_channels.items():
+            table_name = f"channel_{ch_id}"
             try:
-                ch_id = int(table_name.replace("channel_", ""))
-                info = channel_info.get(ch_id, {"title": "Unknown", "username": None})
-
                 # Find messages pointing to the given message as their original
                 cursor.execute(f"""
                     SELECT * FROM {table_name}
@@ -919,6 +1034,45 @@ class Database:
 
         return duplicates
 
+    def get_all_duplicates_for_group(self, group_id: int) -> dict[tuple[int, int], list[dict]]:
+        """Get all duplicate relationships within a group in one batch.
+
+        Returns a mapping from (original_channel_id, original_message_id) to list of
+        duplicate messages pointing to that original. One query per channel table
+        instead of per-message.
+        """
+        cursor = self.cursor()
+
+        cursor.execute(
+            "SELECT id, title, username FROM channels WHERE group_id = ?",
+            (group_id,)
+        )
+        group_channels = {r[0]: {"title": r[1], "username": r[2]} for r in cursor.fetchall()}
+
+        result: dict[tuple[int, int], list[dict]] = {}
+
+        for ch_id, info in group_channels.items():
+            table_name = f"channel_{ch_id}"
+            try:
+                cursor.execute(f"""
+                    SELECT * FROM {table_name}
+                    WHERE duplicate_of_channel IS NOT NULL
+                      AND (hidden = 0 OR hidden IS NULL)
+                """)
+                for row in cursor.fetchall():
+                    msg = dict(row)
+                    msg["channel_id"] = ch_id
+                    msg["channel_title"] = info["title"]
+                    msg["channel_username"] = info["username"]
+                    key = (msg["duplicate_of_channel"], msg["duplicate_of_message"])
+                    if key not in result:
+                        result[key] = []
+                    result[key].append(msg)
+            except (sqlite3.Error, ValueError):
+                pass
+
+        return result
+
     def mark_messages_read(self, messages: list[tuple[int, int]]) -> None:
         """Mark multiple messages as read. Each tuple is (channel_id, message_id)."""
         if not messages:
@@ -933,7 +1087,7 @@ class Database:
         logger.info(f"[mark_messages_read] {len(messages)} messages across {len(by_channel)} channels")
 
         now = int(time.time())
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         for channel_id, message_ids in by_channel.items():
             table_name = f"channel_{channel_id}"
             try:
@@ -953,7 +1107,7 @@ class Database:
     def update_message_rating(self, channel_id: int, message_id: int, rating: int) -> None:
         """Update message rating (-1, 0, or 1)."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"UPDATE {table_name} SET rating = ? WHERE id = ?", (rating, message_id))
         except sqlite3.Error:
@@ -962,7 +1116,7 @@ class Database:
     def update_message_bookmark(self, channel_id: int, message_id: int, bookmarked: int) -> None:
         """Update message bookmark status (0 or 1)."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"UPDATE {table_name} SET bookmarked = ? WHERE id = ?", (bookmarked, message_id))
         except sqlite3.Error:
@@ -971,7 +1125,7 @@ class Database:
     def update_message_anchor(self, channel_id: int, message_id: int, anchored: int) -> None:
         """Update message anchor status (0 or 1)."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"UPDATE {table_name} SET anchored = ? WHERE id = ?", (anchored, message_id))
         except sqlite3.Error:
@@ -980,7 +1134,7 @@ class Database:
     def update_message_hidden(self, channel_id: int, message_id: int, hidden: int) -> None:
         """Update message hidden status (0 or 1)."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"UPDATE {table_name} SET hidden = ? WHERE id = ?", (hidden, message_id))
         except sqlite3.Error:
@@ -989,7 +1143,7 @@ class Database:
     def get_anchored_messages(self, channel_id: int) -> list[dict]:
         """Get all anchored messages for a channel, sorted by date."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"""
                 SELECT id, date, message, media_type, media_path, video_thumbnail_path
@@ -1004,7 +1158,7 @@ class Database:
 
     def get_all_bookmarked_messages(self, limit: int = 100) -> list[dict]:
         """Get all bookmarked messages from all channels, sorted by date descending."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'channel_%'")
         tables = [row[0] for row in cursor.fetchall() if not row[0].startswith("channel_backup_hash_")]
 
@@ -1034,7 +1188,7 @@ class Database:
     def get_channel_stats(self, channel_id: int) -> dict:
         """Get message statistics for a channel (excludes hidden messages)."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"""
                 SELECT
@@ -1058,12 +1212,32 @@ class Database:
             pass
         return {"total": 0, "unread": 0, "bookmarked": 0, "likes": 0, "dislikes": 0}
 
+    def count_unread_by_group(self, exclusions: list[dict] | None = None) -> dict[int, int]:
+        """Count unread messages per group using the exact same pipeline as message loading.
+
+        Runs get_unread_messages_by_group (which includes album grouping) then
+        applies tag exclusion filtering — identical to what the feed shows.
+        """
+        cursor = self.cursor()
+        cursor.execute("SELECT id FROM groups")
+        group_ids = [r[0] for r in cursor.fetchall()]
+
+        counts: dict[int, int] = {}
+        for group_id in group_ids:
+            messages = self.get_unread_messages_by_group(group_id, limit=10000)
+            if exclusions:
+                messages = [m for m in messages
+                            if not self.check_tag_exclusions(m.get('ai_summary') or '', exclusions)]
+            counts[group_id] = len(messages)
+
+        return counts
+
     # Read sync methods
 
     def mark_messages_read_up_to(self, channel_id: int, max_id: int) -> int:
         """Mark all messages up to max_id as read (syncing from Telegram)."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"""
                 UPDATE {table_name} SET read = 1 WHERE id <= ? AND read = 0
@@ -1075,7 +1249,7 @@ class Database:
     def get_unsynced_read_messages(self, channel_id: int, limit: int = 100) -> list[dict]:
         """Get messages that are read locally but not synced to Telegram."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"""
                 SELECT id FROM {table_name}
@@ -1090,7 +1264,7 @@ class Database:
     def mark_messages_synced_to_tg(self, channel_id: int, max_id: int) -> int:
         """Mark all messages up to max_id as synced to Telegram."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"""
                 UPDATE {table_name} SET read_in_tg = 1
@@ -1105,7 +1279,7 @@ class Database:
     def get_messages_needing_hashes(self, channel_id: int, limit: int = 100, min_length: int = 50) -> list[dict]:
         """Get unread messages that need content hash generation."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"""
                 SELECT id, message, media_type, date
@@ -1126,7 +1300,7 @@ class Database:
                             ai_summary: str | None = None) -> None:
         """Update content hash and AI summary for a message and mark as processed."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute(f"""
             UPDATE {table_name}
             SET content_hash = ?, ai_summary = ?, content_hash_pending = 0
@@ -1136,7 +1310,7 @@ class Database:
     def skip_content_hash(self, channel_id: int, message_id: int) -> None:
         """Mark a message as skipped for hashing (too short, media-only, error, etc.)."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute(f"""
             UPDATE {table_name} SET content_hash_pending = -1 WHERE id = ?
         """, (message_id,))
@@ -1145,7 +1319,7 @@ class Database:
                           original_channel: int, original_message: int) -> None:
         """Mark a message as a duplicate of another message."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute(f"""
             UPDATE {table_name}
             SET duplicate_of_channel = ?, duplicate_of_message = ?
@@ -1153,28 +1327,33 @@ class Database:
         """, (original_channel, original_message, message_id))
 
     def register_content_hash(self, content_hash: str, channel_id: int,
-                              message_id: int, message_date: int) -> tuple[int, int] | None:
-        """Register a content hash or return existing original if duplicate."""
-        cursor = self.conn.cursor()
+                              message_id: int, message_date: int,
+                              group_id: int = 0) -> tuple[int, int] | None:
+        """Register a content hash or return existing original if duplicate.
+
+        Only matches within the same group_id.
+        """
+        cursor = self.cursor()
         cursor.execute("""
-            SELECT channel_id, message_id FROM content_hashes WHERE hash = ?
-        """, (content_hash,))
+            SELECT channel_id, message_id FROM content_hashes
+            WHERE hash = ? AND group_id = ?
+        """, (content_hash, group_id))
         existing = cursor.fetchone()
 
         if existing:
             return (existing[0], existing[1])
 
         cursor.execute("""
-            INSERT INTO content_hashes (hash, channel_id, message_id, message_date, created_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (content_hash, channel_id, message_id, message_date, int(time.time())))
+            INSERT INTO content_hashes (hash, group_id, channel_id, message_id, message_date, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (content_hash, group_id, channel_id, message_id, message_date, int(time.time())))
 
         return None
 
     def get_short_messages_for_skip(self, channel_id: int, limit: int = 500, min_length: int = 50) -> list[int]:
         """Get unread message IDs that are too short for hashing and should be skipped."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"""
                 SELECT id FROM {table_name}
@@ -1195,7 +1374,7 @@ class Database:
         Returns messages that have media_path (downloaded media) and media_hash_pending=1.
         """
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"""
                 SELECT id, media_path, media_type, grouped_id, date
@@ -1215,7 +1394,7 @@ class Database:
     def get_album_messages(self, channel_id: int, grouped_id: int) -> list[dict]:
         """Get all messages in an album (same grouped_id)."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"""
                 SELECT *
@@ -1230,7 +1409,7 @@ class Database:
     def update_media_hash(self, channel_id: int, message_id: int, media_hash: str) -> None:
         """Update media hash for a message and mark as processed."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute(f"""
             UPDATE {table_name}
             SET media_hash = ?, media_hash_pending = 0
@@ -1240,34 +1419,39 @@ class Database:
     def skip_media_hash(self, channel_id: int, message_id: int) -> None:
         """Mark a message as skipped for media hashing (no media, error, etc.)."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute(f"""
             UPDATE {table_name} SET media_hash_pending = -1 WHERE id = ?
         """, (message_id,))
 
     def register_media_hash(self, media_hash: str, channel_id: int,
-                            message_id: int, message_date: int) -> tuple[int, int] | None:
-        """Register a media hash or return existing original if duplicate."""
-        cursor = self.conn.cursor()
+                            message_id: int, message_date: int,
+                            group_id: int = 0) -> tuple[int, int] | None:
+        """Register a media hash or return existing original if duplicate.
+
+        Only matches within the same group_id.
+        """
+        cursor = self.cursor()
         cursor.execute("""
-            SELECT channel_id, message_id FROM media_hashes WHERE hash = ?
-        """, (media_hash,))
+            SELECT channel_id, message_id FROM media_hashes
+            WHERE hash = ? AND group_id = ?
+        """, (media_hash, group_id))
         existing = cursor.fetchone()
 
         if existing:
             return (existing[0], existing[1])
 
         cursor.execute("""
-            INSERT INTO media_hashes (hash, channel_id, message_id, message_date, created_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (media_hash, channel_id, message_id, message_date, int(time.time())))
+            INSERT INTO media_hashes (hash, group_id, channel_id, message_id, message_date, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (media_hash, group_id, channel_id, message_id, message_date, int(time.time())))
 
         return None
 
     def get_messages_without_media_for_skip(self, channel_id: int, limit: int = 500) -> list[int]:
         """Get unread message IDs that have no media and should be skipped for media hashing."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"""
                 SELECT id FROM {table_name}
@@ -1280,18 +1464,63 @@ class Database:
         except sqlite3.Error:
             return []
 
+    # Tag exclusion methods
+
+    def get_all_tag_exclusions(self) -> list[dict]:
+        """Get all tag exclusion groups."""
+        cursor = self.cursor()
+        cursor.execute("SELECT * FROM tag_exclusions ORDER BY created_at DESC")
+        return [dict(row) for row in cursor.fetchall()]
+
+    def create_tag_exclusion(self, tags: str) -> int:
+        """Create a tag exclusion group. Normalizes tags (sort, dedupe, lowercase).
+        Returns the id of the created/existing row."""
+        normalized = ', '.join(sorted(set(
+            t.strip().lower() for t in tags.split(',') if t.strip()
+        )))
+        if not normalized:
+            return 0
+        cursor = self.cursor()
+        cursor.execute(
+            "INSERT OR IGNORE INTO tag_exclusions (tags, created_at) VALUES (?, ?)",
+            (normalized, int(time.time()))
+        )
+        if cursor.lastrowid:
+            return cursor.lastrowid
+        # Already exists, fetch id
+        cursor.execute("SELECT id FROM tag_exclusions WHERE tags = ?", (normalized,))
+        row = cursor.fetchone()
+        return row[0] if row else 0
+
+    def delete_tag_exclusion(self, exclusion_id: int) -> None:
+        """Delete a tag exclusion group by id."""
+        cursor = self.cursor()
+        cursor.execute("DELETE FROM tag_exclusions WHERE id = ?", (exclusion_id,))
+
+    @staticmethod
+    def check_tag_exclusions(ai_summary: str, exclusions: list[dict]) -> bool:
+        """Return True if ai_summary matches ANY exclusion group (all tags present)."""
+        if not ai_summary:
+            return False
+        msg_tags = {t.strip().lower() for t in ai_summary.split(',') if t.strip()}
+        for exc in exclusions:
+            exc_tags = {t.strip().lower() for t in exc['tags'].split(',') if t.strip()}
+            if exc_tags and exc_tags.issubset(msg_tags):
+                return True
+        return False
+
     # Telegram credentials methods (for tg_daemon)
 
     def get_all_tg_creds(self) -> list[dict]:
         """Get all Telegram credentials."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute('SELECT id, api_id, api_hash, phone_number, "primary" FROM tg_creds')
         return [{"id": r[0], "api_id": r[1], "api_hash": r[2],
                  "phone_number": r[3], "primary": bool(r[4])} for r in cursor.fetchall()]
 
     def get_primary_tg_cred(self) -> dict | None:
         """Get the primary Telegram credential."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute('SELECT id, api_id, api_hash, phone_number FROM tg_creds WHERE "primary" = 1 LIMIT 1')
         row = cursor.fetchone()
         if row:
@@ -1300,7 +1529,7 @@ class Database:
 
     def get_tg_cred(self, cred_id: int) -> dict | None:
         """Get a specific Telegram credential by ID."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute('SELECT id, api_id, api_hash, phone_number, "primary" FROM tg_creds WHERE id = ?', (cred_id,))
         row = cursor.fetchone()
         if row:
@@ -1310,7 +1539,7 @@ class Database:
 
     def add_tg_cred(self, api_id: int, api_hash: str, phone_number: str, primary: bool = False) -> int:
         """Add a new Telegram credential. Returns the new ID."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         # If setting as primary, clear existing primary
         if primary:
             cursor.execute('UPDATE tg_creds SET "primary" = 0 WHERE "primary" = 1')
@@ -1323,7 +1552,7 @@ class Database:
     def update_tg_cred(self, cred_id: int, api_id: int = None, api_hash: str = None,
                        phone_number: str = None, primary: bool = None) -> None:
         """Update a Telegram credential."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         updates = []
         params = []
         if api_id is not None:
@@ -1347,12 +1576,12 @@ class Database:
 
     def delete_tg_cred(self, cred_id: int) -> None:
         """Delete a Telegram credential."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute("DELETE FROM tg_creds WHERE id = ?", (cred_id,))
 
     def set_primary_tg_cred(self, cred_id: int) -> None:
         """Set a credential as primary (clears other primaries)."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute('UPDATE tg_creds SET "primary" = 0 WHERE "primary" = 1')
         cursor.execute('UPDATE tg_creds SET "primary" = 1 WHERE id = ?', (cred_id,))
 
@@ -1375,7 +1604,7 @@ class Database:
         if not query or len(query) < 3:
             return []
 
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
 
         # Get channel info for results
         cursor.execute("SELECT id, title, username FROM channels")
@@ -1445,7 +1674,7 @@ class Database:
     def get_all_messages_for_indexing(self, channel_id: int) -> list[dict]:
         """Get all messages with text content for search indexing."""
         table_name = f"channel_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"""
                 SELECT id, message FROM {table_name}
@@ -1459,7 +1688,7 @@ class Database:
 
     def get_indexed_message_ids(self, channel_id: int) -> set[int]:
         """Get all message IDs that are already in the FTS index for a channel."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute("""
                 SELECT message_id FROM messages_fts WHERE channel_id = ?
@@ -1474,7 +1703,7 @@ class Database:
         Returns True if indexed successfully.
         Note: In contentless mode, we just insert - duplicates will error.
         """
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute("""
                 INSERT INTO messages_fts(channel_id, message_id, message)
@@ -1500,7 +1729,7 @@ class Database:
         """
         if not messages:
             return 0
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         count = 0
         for msg in messages:
             try:
@@ -1515,7 +1744,7 @@ class Database:
 
     def get_search_index_stats(self) -> dict:
         """Get statistics about the search index."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         stats = {"indexed_messages": 0, "table_exists": False}
         try:
             # Check if table exists and get schema
@@ -1544,7 +1773,7 @@ class Database:
 
         Note: Contentless FTS5 requires providing the original content for deletion.
         """
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute("""
                 INSERT INTO messages_fts(messages_fts, channel_id, message_id, message)
@@ -1555,7 +1784,7 @@ class Database:
 
     def clear_search_index(self) -> None:
         """Clear the entire FTS5 search index (for rebuild)."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             # Drop and recreate the FTS table
             cursor.execute("DROP TABLE IF EXISTS messages_fts")
@@ -1573,7 +1802,7 @@ class Database:
 
     def optimize_search_index(self) -> None:
         """Optimize the FTS5 index by merging b-trees."""
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute("INSERT INTO messages_fts(messages_fts) VALUES('optimize')")
             logger.info("Search index optimized")
@@ -1585,7 +1814,7 @@ class Database:
     def create_backup_hash_table(self, channel_id: int) -> None:
         """Create a backup hash table for a channel if it doesn't exist."""
         table_name = f"channel_backup_hash_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS {table_name} (
                 file_path TEXT PRIMARY KEY,
@@ -1605,7 +1834,7 @@ class Database:
     def get_backup_hash_count(self, channel_id: int) -> int:
         """Get the number of hashed files for a channel."""
         table_name = f"channel_backup_hash_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
             return cursor.fetchone()[0]
@@ -1616,7 +1845,7 @@ class Database:
                            file_size: int, file_hash: str | None) -> None:
         """Insert or update a backup file hash."""
         table_name = f"channel_backup_hash_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.execute(f"""
             INSERT OR REPLACE INTO {table_name} (file_path, file_size, hash)
             VALUES (?, ?, ?)
@@ -1629,7 +1858,7 @@ class Database:
         if not hashes:
             return 0
         table_name = f"channel_backup_hash_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         cursor.executemany(f"""
             INSERT OR REPLACE INTO {table_name} (file_path, file_size, hash)
             VALUES (?, ?, ?)
@@ -1639,7 +1868,7 @@ class Database:
     def find_backup_by_hash(self, channel_id: int, file_hash: str) -> str | None:
         """Find a backup file by its hash. Returns file path or None."""
         table_name = f"channel_backup_hash_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"""
                 SELECT file_path FROM {table_name} WHERE hash = ? LIMIT 1
@@ -1652,7 +1881,7 @@ class Database:
     def get_existing_backup_paths(self, channel_id: int) -> set[str]:
         """Get all file paths already in the backup hash table."""
         table_name = f"channel_backup_hash_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"SELECT file_path FROM {table_name}")
             return {row[0] for row in cursor.fetchall()}
@@ -1662,7 +1891,7 @@ class Database:
     def clear_backup_hashes(self, channel_id: int) -> None:
         """Clear all backup hashes for a channel."""
         table_name = f"channel_backup_hash_{channel_id}"
-        cursor = self.conn.cursor()
+        cursor = self.cursor()
         try:
             cursor.execute(f"DELETE FROM {table_name}")
         except sqlite3.Error:

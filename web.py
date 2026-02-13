@@ -8,7 +8,7 @@ from bottle import Bottle, request, response, static_file, TEMPLATE_PATH
 from pathlib import Path
 
 from config import DATA_DIR, MEDIA_DIR, WEB_HOST, WEB_PORT, PAUSE_FILE
-from database import Database
+from database import Database, DatabaseMigration
 
 # Configure logging
 logging.basicConfig(
@@ -46,6 +46,16 @@ def get_channels():
             channel["stats"] = stats
             result.append(channel)
         return json.dumps(result)
+
+
+@app.route("/api/groups/unread-counts")
+def get_group_unread_counts():
+    """Get unread message counts per group, with tag exclusion filtering."""
+    response.content_type = "application/json"
+    with Database() as db:
+        exclusions = db.get_all_tag_exclusions()
+        counts = db.count_unread_by_group(exclusions if exclusions else None)
+    return json.dumps(counts)
 
 
 @app.route("/api/groups")
@@ -182,6 +192,40 @@ def update_group_dedup(group_id):
         db.set_group_dedup(group_id, dedup)
         db.commit()
     return json.dumps({"success": True})
+
+
+@app.route("/api/tag-exclusions")
+def get_tag_exclusions():
+    """Get all tag exclusion groups."""
+    response.content_type = "application/json"
+    with Database() as db:
+        exclusions = db.get_all_tag_exclusions()
+        return json.dumps(exclusions)
+
+
+@app.route("/api/tag-exclusion", method="POST")
+def create_tag_exclusion():
+    """Create a new tag exclusion group."""
+    response.content_type = "application/json"
+    data = request.json
+    tags = data.get("tags", "").strip()
+    if not tags:
+        response.status = 400
+        return json.dumps({"error": "Tags are required"})
+    with Database() as db:
+        exclusion_id = db.create_tag_exclusion(tags)
+        db.commit()
+        return json.dumps({"success": True, "id": exclusion_id})
+
+
+@app.route("/api/tag-exclusion/<exclusion_id:int>", method="DELETE")
+def delete_tag_exclusion(exclusion_id):
+    """Delete a tag exclusion group."""
+    response.content_type = "application/json"
+    with Database() as db:
+        db.delete_tag_exclusion(exclusion_id)
+        db.commit()
+        return json.dumps({"success": True})
 
 
 @app.route("/media/<filepath:path>")
@@ -396,16 +440,39 @@ def consolidate_album_messages(messages: list[dict]) -> list[dict]:
     return result
 
 
-def enrich_with_duplicates(messages: list[dict], db) -> list[dict]:
+def enrich_with_duplicates(messages: list[dict], db, group_id: int | None = None) -> list[dict]:
     """Add duplicate variants to messages.
 
     For each message that is an "original" (has duplicates pointing to it),
     adds a 'variants' array containing all versions of the message.
     Messages that are duplicates themselves get the original + all variants.
     Albums (grouped_id) are consolidated so each variant is the full album.
+
+    When group_id is provided, uses a single batch query for all duplicates
+    instead of per-message queries.
     """
     if not messages:
         return messages
+
+    # Batch-load all duplicate relationships for the group (one query per channel table)
+    if group_id is not None:
+        dup_map = db.get_all_duplicates_for_group(group_id)
+    else:
+        dup_map = None
+
+    # Cache channel info to avoid repeated queries
+    channel_cache: dict[int, dict | None] = {}
+
+    def get_channel_cached(ch_id: int) -> dict | None:
+        if ch_id not in channel_cache:
+            channel_cache[ch_id] = db.get_channel_by_id(ch_id)
+        return channel_cache[ch_id]
+
+    def lookup_duplicates(ch_id: int, msg_id: int) -> list[dict]:
+        """Get duplicates for a message, using batch map or per-message query."""
+        if dup_map is not None:
+            return list(dup_map.get((ch_id, msg_id), []))
+        return db.get_message_duplicates(ch_id, msg_id)
 
     # Build a map of message keys for quick lookup
     msg_keys = {(m["channel_id"], m["id"]): m for m in messages}
@@ -426,14 +493,27 @@ def enrich_with_duplicates(messages: list[dict], db) -> list[dict]:
         orig_msg = msg.get("duplicate_of_message")
 
         if orig_ch and orig_msg:
+            # Only treat as duplicate if original is in the same group
+            this_channel = get_channel_cached(ch_id)
+            orig_channel = get_channel_cached(orig_ch)
+            same_group = (
+                this_channel and orig_channel
+                and this_channel.get("group_id")
+                and this_channel["group_id"] == orig_channel.get("group_id")
+            )
+
+            if not same_group:
+                orig_ch = None
+                orig_msg = None
+
+        if orig_ch and orig_msg:
             # This is a duplicate - find the original and all siblings
             original_key = (orig_ch, orig_msg)
 
-            # Get the original message (and its album if applicable)
             original = db.get_message(orig_ch, orig_msg)
             if original:
-                # Get channel info for original
-                orig_channel = db.get_channel_by_id(orig_ch)
+                if not orig_channel:
+                    orig_channel = get_channel_cached(orig_ch)
                 if orig_channel:
                     original["channel_id"] = orig_ch
                     original["channel_title"] = orig_channel["title"]
@@ -448,7 +528,7 @@ def enrich_with_duplicates(messages: list[dict], db) -> list[dict]:
 
                 seen_dup_ids = set()
                 for orig_id in original_msg_ids:
-                    dups = db.get_message_duplicates(orig_ch, orig_id)
+                    dups = lookup_duplicates(orig_ch, orig_id)
                     for d in dups:
                         dup_key = (d["channel_id"], d["id"])
                         if dup_key not in seen_dup_ids:
@@ -461,7 +541,6 @@ def enrich_with_duplicates(messages: list[dict], db) -> list[dict]:
                 # Also consolidate original if it's an album
                 original_list = [original]
                 if original.get("grouped_id"):
-                    # Fetch all album messages for original
                     album_msgs = db.get_album_messages(orig_ch, original["grouped_id"])
                     if album_msgs:
                         for am in album_msgs:
@@ -471,10 +550,8 @@ def enrich_with_duplicates(messages: list[dict], db) -> list[dict]:
                         original_list = album_msgs
                 consolidated_original = consolidate_album_messages(original_list)
 
-                # Build variants: consolidated original + consolidated duplicates
                 variants = consolidated_original + consolidated_dups
 
-                # Deduplicate variants by (channel_id, first message id)
                 seen_variants = set()
                 unique_variants = []
                 for v in variants:
@@ -485,19 +562,15 @@ def enrich_with_duplicates(messages: list[dict], db) -> list[dict]:
 
                 msg["variants"] = unique_variants
                 processed.add(key)
-                # Mark current message's album IDs as processed
                 if msg.get("album_message_ids"):
                     for album_id in msg["album_message_ids"]:
                         processed.add((ch_id, album_id))
-                # Mark original album message IDs as processed
                 for orig_id in original_msg_ids:
                     processed.add((orig_ch, orig_id))
-                # Also mark all duplicates as processed
                 for v in all_dups:
                     processed.add((v["channel_id"], v["id"]))
         else:
             # This might be an original - check for duplicates
-            # If this is an album, get duplicates for ALL album messages
             all_msg_ids = [msg_id]
             if msg.get("album_message_ids"):
                 all_msg_ids = msg["album_message_ids"]
@@ -508,7 +581,7 @@ def enrich_with_duplicates(messages: list[dict], db) -> list[dict]:
             duplicates = []
             seen_dup_ids = set()
             for m_id in all_msg_ids:
-                dups = db.get_message_duplicates(ch_id, m_id)
+                dups = lookup_duplicates(ch_id, m_id)
                 for d in dups:
                     dup_key = (d["channel_id"], d["id"])
                     if dup_key not in seen_dup_ids:
@@ -516,17 +589,14 @@ def enrich_with_duplicates(messages: list[dict], db) -> list[dict]:
                         duplicates.append(d)
 
             if duplicates:
-                # This is an original with duplicates
-                # Build self variant - msg already has media_items from main query
                 self_variant = msg.copy()
                 self_variant["channel_id"] = ch_id
                 if "channel_title" not in self_variant:
-                    channel = db.get_channel_by_id(ch_id)
+                    channel = get_channel_cached(ch_id)
                     if channel:
                         self_variant["channel_title"] = channel["title"]
                         self_variant["channel_username"] = channel.get("username")
 
-                # Ensure media_items exists on self
                 if "media_items" not in self_variant:
                     if self_variant.get("media_path") or self_variant.get("media_type"):
                         self_variant["media_items"] = [{
@@ -538,12 +608,9 @@ def enrich_with_duplicates(messages: list[dict], db) -> list[dict]:
                     else:
                         self_variant["media_items"] = []
 
-                # Consolidate duplicates by album
                 consolidated_dups = consolidate_album_messages(duplicates)
-
                 variants = [self_variant] + consolidated_dups
 
-                # Deduplicate variants by (channel_id, first message id)
                 seen_variants = set()
                 unique_variants = []
                 for v in variants:
@@ -554,10 +621,8 @@ def enrich_with_duplicates(messages: list[dict], db) -> list[dict]:
 
                 msg["variants"] = unique_variants
                 processed.add(key)
-                # Mark current message's album IDs as processed
                 for m_id in all_msg_ids:
                     processed.add((ch_id, m_id))
-                # Mark duplicates as processed so we don't show them separately
                 for d in duplicates:
                     processed.add((d["channel_id"], d["id"]))
 
@@ -584,6 +649,15 @@ def enrich_with_duplicates(messages: list[dict], db) -> list[dict]:
     return result
 
 
+@app.route("/api/group/<group_id:int>/tag-counts")
+def get_group_tag_counts(group_id):
+    """Get tag frequency counts for unread messages in a group."""
+    response.content_type = "application/json"
+    with Database() as db:
+        counts = db.get_group_tag_counts(group_id)
+    return json.dumps(counts)
+
+
 @app.route("/api/group/<group_id:int>/messages")
 def get_group_messages(group_id):
     """Get unread messages for a group, optionally filtered to a single channel."""
@@ -593,7 +667,11 @@ def get_group_messages(group_id):
     channel_id = int(channel_id) if channel_id else None
     with Database() as db:
         messages = db.get_unread_messages_by_group(group_id, limit, channel_id)
-        messages = enrich_with_duplicates(messages, db)
+        exclusions = db.get_all_tag_exclusions()
+        if exclusions:
+            messages = [m for m in messages
+                        if not Database.check_tag_exclusions(m.get('ai_summary') or '', exclusions)]
+        messages = enrich_with_duplicates(messages, db, group_id=group_id)
         return json.dumps(messages)
 
 
@@ -609,7 +687,11 @@ def get_earlier_messages(group_id):
         return json.dumps([])
     with Database() as db:
         messages = db.get_earlier_messages_by_group(group_id, before_date, limit, channel_id)
-        messages = enrich_with_duplicates(messages, db)
+        exclusions = db.get_all_tag_exclusions()
+        if exclusions:
+            messages = [m for m in messages
+                        if not Database.check_tag_exclusions(m.get('ai_summary') or '', exclusions)]
+        messages = enrich_with_duplicates(messages, db, group_id=group_id)
         return json.dumps(messages)
 
 
@@ -839,6 +921,7 @@ def search_stats():
 
 def main():
     """Run the web server."""
+    DatabaseMigration().migrate()
     print(f"Starting TGFeed Web UI at http://{WEB_HOST}:{WEB_PORT}")
     app.run(host=WEB_HOST, port=WEB_PORT, server="waitress")
 

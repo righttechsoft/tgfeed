@@ -1150,6 +1150,75 @@
             font-size: 14px;
         }
 
+        /* Right-side wrapper for actions + tag panel */
+        .message-right {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            flex-shrink: 0;
+        }
+
+        /* Tag panel (desktop only) */
+        .tag-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+            max-width: 120px;
+            padding-top: 4px;
+            flex-shrink: 0;
+        }
+        .tag-chip {
+            display: flex; align-items: center; gap: 2px;
+            font-size: 10px; padding: 2px 4px;
+            background: #f0f0f0; border-radius: 3px;
+            color: #555; cursor: default; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis;
+        }
+        .tag-chip.struck .tag-text { text-decoration: line-through; color: #bbb; }
+        .tag-count { font-size: 9px; color: #999; margin-left: 2px; }
+        .tag-chip .tag-x { cursor: pointer; color: #999; font-size: 9px; margin-left: 2px; }
+        .tag-chip .tag-x:hover { color: #e00; }
+        .tag-apply-btn {
+            border: none; background: none; cursor: pointer;
+            color: #999; font-size: 16px; padding: 2px; text-align: center;
+        }
+        .tag-apply-btn:hover { color: #4CAF50; }
+
+        /* Tag exclusions section in sidebar */
+        .tag-exclusions-section {
+            margin-top: 20px;
+            padding-top: 16px;
+            border-top: 1px solid #e0e0e0;
+        }
+        .tag-exclusions-header {
+            font-size: 13px;
+            font-weight: 600;
+            color: #555;
+            padding: 0 8px 8px;
+        }
+        .tag-exclusion-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 4px 8px;
+            font-size: 11px;
+            color: #666;
+        }
+        .tag-exclusion-item .exclusion-tags {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .tag-exclusion-item .exclusion-delete {
+            cursor: pointer;
+            color: #999;
+            font-size: 14px;
+            margin-left: 6px;
+            flex-shrink: 0;
+        }
+        .tag-exclusion-item .exclusion-delete:hover { color: #e00; }
+
         /* Message with action buttons container */
         .message-row {
             display: flex;
@@ -1870,9 +1939,15 @@
                 gap: 12px;
             }
 
-            /* Hide anchor gallery on mobile - too small */
+            /* Hide anchor gallery and tag panels on mobile */
             .anchor-gallery {
                 display: none !important;
+            }
+            .tag-panel {
+                display: none;
+            }
+            .message-right {
+                display: contents;
             }
 
             .single-channel-view.has-anchor-gallery .main-content {
@@ -2082,6 +2157,10 @@
                 <button class="add-group-btn" id="addGroupBtn">Add</button>
             </div>
             <div class="groups-list" id="groupsList"></div>
+            <div class="tag-exclusions-section">
+                <div class="tag-exclusions-header">Tag Exclusions</div>
+                <div id="tagExclusionsList"></div>
+            </div>
         </div>
     </aside>
 
@@ -2122,6 +2201,7 @@
         let showingSearch = false;  // Track if showing search results
         let currentSearchQuery = '';  // Current search query
         let messages = [];
+        let tagCounts = {};  // tag -> count for current group
         let readMessages = new Set();
         let earliestDate = null;
         let latestDate = null;
@@ -2579,11 +2659,45 @@
             }
         }
 
+        // Tag exclusion management
+        async function loadTagExclusions() {
+            try {
+                const res = await fetch('/api/tag-exclusions');
+                const exclusions = await res.json();
+                renderTagExclusions(exclusions);
+            } catch (e) {
+                console.error('Failed to load tag exclusions:', e);
+            }
+        }
+
+        function renderTagExclusions(exclusions) {
+            const container = document.getElementById('tagExclusionsList');
+            if (!container) return;
+            if (!exclusions || exclusions.length === 0) {
+                container.innerHTML = '<div style="padding: 4px 8px; font-size: 11px; color: #aaa;">None yet</div>';
+                return;
+            }
+            container.innerHTML = exclusions.map(exc =>
+                `<div class="tag-exclusion-item" data-id="${exc.id}">
+                    <span class="exclusion-tags" title="${escapeHtml(exc.tags)}">${escapeHtml(exc.tags)}</span>
+                    <span class="exclusion-delete" title="Delete">&times;</span>
+                </div>`
+            ).join('');
+            container.querySelectorAll('.exclusion-delete').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    const id = btn.closest('.tag-exclusion-item').dataset.id;
+                    await fetch(`/api/tag-exclusion/${id}`, { method: 'DELETE' });
+                    loadTagExclusions();
+                });
+            });
+        }
+
         // Load data
         async function loadData() {
             const [channelsRes, groupsRes] = await Promise.all([
                 fetch('/api/channels'),
-                fetch('/api/groups')
+                fetch('/api/groups'),
+                fetchGroupUnreadCounts()
             ]);
             channels = await channelsRes.json();
             groups = await groupsRes.json();
@@ -2591,25 +2705,21 @@
             renderGroupTabs();
         }
 
-        // Calculate unread counts per group (only active channels)
-        function getGroupUnreadCounts() {
-            const counts = {};
-            groups.forEach(group => {
-                counts[group.id] = 0;
-            });
+        // Cached group unread counts (from server, respects tag exclusions)
+        let groupUnreadCounts = {};
 
-            channels.forEach(channel => {
-                if (channel.active && channel.group_id && channel.stats && channel.stats.unread) {
-                    counts[channel.group_id] = (counts[channel.group_id] || 0) + channel.stats.unread;
-                }
-            });
-
-            return counts;
+        async function fetchGroupUnreadCounts() {
+            try {
+                const res = await fetch('/api/groups/unread-counts');
+                groupUnreadCounts = await res.json();
+            } catch (e) {
+                groupUnreadCounts = {};
+            }
         }
 
         // Render group tabs in header
         function renderGroupTabs() {
-            const unreadCounts = getGroupUnreadCounts();
+            const unreadCounts = groupUnreadCounts;
             let html = '';
             groups.forEach(group => {
                 const activeClass = currentGroupId === group.id && !showingBookmarks && !showingSearch ? 'active' : '';
@@ -2988,8 +3098,13 @@
                 if (currentChannelId) {
                     url += `&channel=${currentChannelId}`;
                 }
-                const res = await fetch(url);
+                // Load messages and tag counts in parallel
+                const [res, tagRes] = await Promise.all([
+                    fetch(url),
+                    fetch(`/api/group/${groupId}/tag-counts`)
+                ]);
                 messages = await res.json();
+                tagCounts = await tagRes.json();
                 updateEarliestDate();
                 renderFeed();
             } catch (e) {
@@ -3407,6 +3522,9 @@
         // Setup action buttons for specific elements (used when prepending)
         function setupActionButtonsForElements(elements) {
             elements.forEach(el => {
+                // Setup tag panel
+                setupTagPanel(el);
+
                 // Check if this row contains a variants carousel
                 const carouselCard = el.querySelector('.message-card.variants-carousel');
                 const isCarousel = !!carouselCard;
@@ -3865,6 +3983,20 @@
 
             const albumIds = (primaryVariant.album_message_ids || [primaryVariant.id]).join(',');
 
+            // Build tag panel from primary variant's ai_summary
+            let tagPanelHtml = '';
+            if (primaryVariant.ai_summary && !showingBookmarks) {
+                const tags = primaryVariant.ai_summary.split(',').map(t => t.trim()).filter(Boolean);
+                if (tags.length > 0) {
+                    const tagChips = tags.map(tag => {
+                        const count = tagCounts[tag.toLowerCase()] || 0;
+                        const countHtml = count > 0 ? `<span class="tag-count">${count}</span>` : '';
+                        return `<span class="tag-chip"><span class="tag-text">${escapeHtml(tag)}</span>${countHtml}<span class="tag-x">&times;</span></span>`;
+                    }).join('');
+                    tagPanelHtml = `<div class="tag-panel">${tagChips}<button class="tag-apply-btn" title="Exclude these tags">&#10003;</button></div>`;
+                }
+            }
+
             return `
                 <div class="message-row"
                      data-channel-id="${primaryVariant.channel_id}"
@@ -3872,7 +4004,8 @@
                      data-album-ids="${albumIds}"
                      data-read="${primaryVariant.read || 0}"
                      data-variants='${variantsData}'
-                     data-current-variant="0">
+                     data-current-variant="0"
+                     data-ai-summary="${escapeHtml(primaryVariant.ai_summary || '')}">
                     <button class="skip-btn" title="Skip to next message">&#8595;</button>
                     <div class="message-card variants-carousel">
                         <div class="variants-tabs">${tabsHtml}</div>
@@ -3882,21 +4015,24 @@
                             <button class="variant-nav next" ${variants.length <= 1 ? 'disabled' : ''}>&#10095;</button>
                         </div>
                     </div>
-                    <div class="message-actions">
-                        <button class="action-btn thumb-up ${thumbUpActive}" title="Like">&#128077;</button>
-                        <button class="action-btn thumb-down ${thumbDownActive}" title="Dislike">&#128078;</button>
-                        <button class="action-btn bookmark ${bookmarkActive}" title="Bookmark">
-                            <svg class="bookmark-icon ${bookmarkActive ? 'filled' : ''}" viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>
-                        </button>
-                        <button class="action-btn anchor ${anchorActive}" title="Anchor">
-                            <svg class="anchor-icon" viewBox="0 0 24 24"><circle cx="12" cy="5" r="3"></circle><line x1="12" y1="8" x2="12" y2="21"></line><path d="M5 12H2a10 10 0 0 0 20 0h-3"></path></svg>
-                        </button>
-                        <button class="action-btn hide ${hiddenActive}" title="Hide">
-                            <svg class="hide-icon" viewBox="0 0 24 24">
-                                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
-                                <line x1="1" y1="1" x2="23" y2="23"></line>
-                            </svg>
-                        </button>
+                    <div class="message-right">
+                        <div class="message-actions">
+                            <button class="action-btn thumb-up ${thumbUpActive}" title="Like">&#128077;</button>
+                            <button class="action-btn thumb-down ${thumbDownActive}" title="Dislike">&#128078;</button>
+                            <button class="action-btn bookmark ${bookmarkActive}" title="Bookmark">
+                                <svg class="bookmark-icon ${bookmarkActive ? 'filled' : ''}" viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>
+                            </button>
+                            <button class="action-btn anchor ${anchorActive}" title="Anchor">
+                                <svg class="anchor-icon" viewBox="0 0 24 24"><circle cx="12" cy="5" r="3"></circle><line x1="12" y1="8" x2="12" y2="21"></line><path d="M5 12H2a10 10 0 0 0 20 0h-3"></path></svg>
+                            </button>
+                            <button class="action-btn hide ${hiddenActive}" title="Hide">
+                                <svg class="hide-icon" viewBox="0 0 24 24">
+                                    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+                                    <line x1="1" y1="1" x2="23" y2="23"></line>
+                                </svg>
+                            </button>
+                        </div>
+                        ${tagPanelHtml}
                     </div>
                 </div>
             `;
@@ -4061,8 +4197,22 @@
             // Build debug info HTML using helper
             const debugInfoHtml = buildDebugInfo(msg);
 
+            // Build tag panel HTML (desktop only, not on bookmarks screen)
+            let tagPanelHtml = '';
+            if (msg.ai_summary && !showingBookmarks) {
+                const tags = msg.ai_summary.split(',').map(t => t.trim()).filter(Boolean);
+                if (tags.length > 0) {
+                    const tagChips = tags.map(tag => {
+                        const count = tagCounts[tag.toLowerCase()] || 0;
+                        const countHtml = count > 0 ? `<span class="tag-count">${count}</span>` : '';
+                        return `<span class="tag-chip"><span class="tag-text">${escapeHtml(tag)}</span>${countHtml}<span class="tag-x">&times;</span></span>`;
+                    }).join('');
+                    tagPanelHtml = `<div class="tag-panel">${tagChips}<button class="tag-apply-btn" title="Exclude these tags">&#10003;</button></div>`;
+                }
+            }
+
             return `
-                <div class="message-row${duplicateClass}">
+                <div class="message-row${duplicateClass}" data-ai-summary="${escapeHtml(msg.ai_summary || '')}">
                     <button class="skip-btn" title="Skip to next message">&#8595;</button>
                     <div class="message-card" data-channel-id="${msg.channel_id}" data-message-id="${msg.id}" data-album-ids="${albumIds}" data-read="${msg.read || 0}">
                         <div class="message-header">
@@ -4085,21 +4235,24 @@
                         ${statsHtml}
                         ${debugInfoHtml}
                     </div>
-                    <div class="message-actions" data-channel-id="${msg.channel_id}" data-message-id="${msg.id}">
-                        <button class="action-btn thumb-up ${thumbUpActive}" title="Like">&#128077;</button>
-                        <button class="action-btn thumb-down ${thumbDownActive}" title="Dislike">&#128078;</button>
-                        <button class="action-btn bookmark ${bookmarkActive}" title="Bookmark">
-                            <svg class="bookmark-icon ${bookmarkActive ? 'filled' : ''}" viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>
-                        </button>
-                        <button class="action-btn anchor ${anchorActive}" title="Anchor">
-                            <svg class="anchor-icon" viewBox="0 0 24 24"><circle cx="12" cy="5" r="3"></circle><line x1="12" y1="8" x2="12" y2="21"></line><path d="M5 12H2a10 10 0 0 0 20 0h-3"></path></svg>
-                        </button>
-                        <button class="action-btn hide ${hiddenActive}" title="Hide">
-                            <svg class="hide-icon" viewBox="0 0 24 24">
-                                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
-                                <line x1="1" y1="1" x2="23" y2="23"></line>
-                            </svg>
-                        </button>
+                    <div class="message-right">
+                        <div class="message-actions" data-channel-id="${msg.channel_id}" data-message-id="${msg.id}">
+                            <button class="action-btn thumb-up ${thumbUpActive}" title="Like">&#128077;</button>
+                            <button class="action-btn thumb-down ${thumbDownActive}" title="Dislike">&#128078;</button>
+                            <button class="action-btn bookmark ${bookmarkActive}" title="Bookmark">
+                                <svg class="bookmark-icon ${bookmarkActive ? 'filled' : ''}" viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>
+                            </button>
+                            <button class="action-btn anchor ${anchorActive}" title="Anchor">
+                                <svg class="anchor-icon" viewBox="0 0 24 24"><circle cx="12" cy="5" r="3"></circle><line x1="12" y1="8" x2="12" y2="21"></line><path d="M5 12H2a10 10 0 0 0 20 0h-3"></path></svg>
+                            </button>
+                            <button class="action-btn hide ${hiddenActive}" title="Hide">
+                                <svg class="hide-icon" viewBox="0 0 24 24">
+                                    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+                                    <line x1="1" y1="1" x2="23" y2="23"></line>
+                                </svg>
+                            </button>
+                        </div>
+                        ${tagPanelHtml}
                     </div>
                 </div>
             `;
@@ -4630,9 +4783,51 @@
         }
 
         // Setup action button handlers
+        function applyExclusionToFeed(excludedTags) {
+            const excludeSet = new Set(excludedTags.map(t => t.toLowerCase().trim()));
+            document.querySelectorAll('.message-row').forEach(row => {
+                const aiSummary = row.dataset.aiSummary;
+                if (!aiSummary) return;
+                const msgTags = new Set(aiSummary.split(',').map(t => t.toLowerCase().trim()).filter(Boolean));
+                if ([...excludeSet].every(t => msgTags.has(t))) {
+                    row.style.display = 'none';
+                }
+            });
+        }
+
+        function setupTagPanel(row) {
+            const tagPanel = row.querySelector('.tag-panel');
+            if (!tagPanel) return;
+            tagPanel.querySelectorAll('.tag-x').forEach(x => {
+                x.addEventListener('click', () => {
+                    x.closest('.tag-chip').classList.toggle('struck');
+                });
+            });
+            const applyBtn = tagPanel.querySelector('.tag-apply-btn');
+            if (applyBtn) {
+                applyBtn.addEventListener('click', async () => {
+                    const struckTags = [...tagPanel.querySelectorAll('.tag-chip.struck .tag-text')]
+                        .map(el => el.textContent.trim()).filter(Boolean);
+                    if (struckTags.length === 0) return;
+                    const tags = struckTags.sort().join(', ');
+                    await fetch('/api/tag-exclusion', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ tags })
+                    });
+                    applyExclusionToFeed(struckTags);
+                    loadTagExclusions();
+                    fetchGroupUnreadCounts().then(() => renderGroupTabs());
+                });
+            }
+        }
+
         function setupActionButtons() {
             // Setup handlers for all message rows including carousels
             document.querySelectorAll('.message-row').forEach(row => {
+                // Setup tag panel
+                setupTagPanel(row);
+
                 // Check if this row contains a variants carousel
                 const carouselCard = row.querySelector('.message-card.variants-carousel');
                 const isCarousel = !!carouselCard;
@@ -5344,18 +5539,13 @@
         // Background refresh of channel stats every minute
         async function refreshChannelStats() {
             try {
-                const res = await fetch('/api/channels');
-                const freshChannels = await res.json();
+                const oldGroupUnread = currentGroupId ? (groupUnreadCounts[currentGroupId] || 0) : 0;
 
-                // Calculate old unread count for current group before updating (only active channels)
-                let oldGroupUnread = 0;
-                if (currentGroupId && !showingBookmarks) {
-                    channels.forEach(ch => {
-                        if (ch.active && ch.group_id === currentGroupId && ch.stats && ch.stats.unread) {
-                            oldGroupUnread += ch.stats.unread;
-                        }
-                    });
-                }
+                const [channelsRes] = await Promise.all([
+                    fetch('/api/channels'),
+                    fetchGroupUnreadCounts()
+                ]);
+                const freshChannels = await channelsRes.json();
 
                 // Update only the stats in our local channels array
                 freshChannels.forEach(fresh => {
@@ -5365,19 +5555,10 @@
                     }
                 });
 
-                // Calculate new unread count for current group after updating (only active channels)
-                let newGroupUnread = 0;
-                if (currentGroupId && !showingBookmarks) {
-                    channels.forEach(ch => {
-                        if (ch.active && ch.group_id === currentGroupId && ch.stats && ch.stats.unread) {
-                            newGroupUnread += ch.stats.unread;
-                        }
-                    });
-                }
-
                 renderGroupTabs();
 
                 // If current group has new unread messages and no messages are loaded, load them
+                const newGroupUnread = currentGroupId ? (groupUnreadCounts[currentGroupId] || 0) : 0;
                 if (currentGroupId && !showingBookmarks && newGroupUnread > oldGroupUnread && messages.length === 0) {
                     loadGroupMessages(currentGroupId);
                 }
@@ -5390,6 +5571,7 @@
         loadData().then(() => {
             // Check URL params after data is loaded
             loadFromUrl();
+            loadTagExclusions();
 
             // Start background refresh every 60 seconds
             setInterval(refreshChannelStats, 60000);

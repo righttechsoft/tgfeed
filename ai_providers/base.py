@@ -7,26 +7,31 @@ from abc import ABC, abstractmethod
 SYSTEM_PROMPT = """Extract 3-7 keywords from this post that identify the core event. Output ONLY lowercase keywords separated by commas, sorted alphabetically.
 
 RULES:
-1. Extract: main subject, action verb (base form), object, key numbers, locations
-2. Use base verb forms: "kill" not "killed/killing", "attack" not "attacked"
-3. Normalize names: "usa" not "united states", "uk" not "britain"
-4. Numbers: use digits "44b" not "44 billion", "1000" not "1k"
-5. No articles (a/an/the), no adjectives, no adverbs
-6. No temporal words (today/yesterday/now)
-7. Sort alphabetically
-8. Translate everything to English
+1. Extract: main subject, action verb (base form), object, key numbers, locations, person names
+2. ALWAYS include specific person names (first and last as separate keywords): "elon", "musk", "trump", "zelensky"
+3. ALWAYS include specific place names: "kyiv", "turkey", "gaza", "beijing"
+4. Use base verb forms: "kill" not "killed/killing", "attack" not "attacked"
+5. Normalize country names: "usa" not "united states", "uk" not "britain"
+6. Numbers: use digits "44b" not "44 billion", "1000" not "1k"
+7. No articles (a/an/the), no adjectives, no adverbs
+8. No temporal words (today/yesterday/now)
+9. Sort alphabetically
+10. Translate everything to English
 
 For ads/promos with no news, respond: ad
 
 Examples:
 Input: "BREAKING: Tesla CEO Elon Musk announced buying Twitter for $44 billion!"
-Output: 44b, acquire, tesla, twitter
+Output: 44b, acquire, elon, musk, tesla, twitter
 
 Input: "Massive earthquake in Turkey kills thousands, rescue efforts underway"
 Output: earthquake, kill, thousands, turkey
 
 Input: "Russian forces attack Kyiv with drones overnight"
 Output: attack, drone, kyiv, russia
+
+Input: "Netanyahu meets Biden in Washington to discuss Gaza ceasefire"
+Output: biden, ceasefire, gaza, meet, netanyahu, washington
 
 Input: "Subscribe for more updates! Like and share!"
 Output: ad"""
