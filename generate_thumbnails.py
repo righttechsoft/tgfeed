@@ -12,11 +12,12 @@ from pathlib import Path
 from config import MEDIA_DIR, validate_config
 from database import Database, DatabaseMigration
 
-# Configure logging
+# Configure logging with UTF-8 encoding for Windows
+import io
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
+    handlers=[logging.StreamHandler(io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace'))],
 )
 logger = logging.getLogger(__name__)
 

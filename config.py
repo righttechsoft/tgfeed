@@ -23,7 +23,7 @@ PAUSE_FILE = DATA_DIR / ".pause"  # Webui creates this to pause sync
 
 # Telegram daemon settings
 TG_DAEMON_HOST = os.getenv("TG_DAEMON_HOST", "127.0.0.1")
-TG_DAEMON_PORT = int(os.getenv("TG_DAEMON_PORT", "9876"))
+TG_DAEMON_PORT = int(os.getenv("TG_DAEMON_PORT", "19876"))
 
 # Web UI settings
 WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
@@ -47,6 +47,11 @@ AI_PROVIDER = os.getenv("AI_PROVIDER", "cerebras")
 # Deduplication settings
 DEDUP_MIN_MESSAGE_LENGTH = int(os.getenv("DEDUP_MIN_MESSAGE_LENGTH", "50"))
 DEDUP_MESSAGES_PER_RUN = int(os.getenv("DEDUP_MESSAGES_PER_RUN", "100"))
+
+# Embedding-based deduplication settings
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "paraphrase-multilingual-MiniLM-L12-v2")
+EMBEDDING_SIMILARITY_THRESHOLD = float(os.getenv("EMBEDDING_SIMILARITY_THRESHOLD", "0.82"))
+EMBEDDING_WINDOW_DAYS = int(os.getenv("EMBEDDING_WINDOW_DAYS", "7"))
 
 
 def validate_config() -> None:

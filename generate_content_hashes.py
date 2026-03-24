@@ -2,10 +2,11 @@
 
 Also generates media hashes for attachment-based deduplication.
 
-Processes messages to create normalized summaries, then hashes them for
-cross-channel duplicate detection.
+Text deduplication uses local sentence-transformer embeddings for semantic
+similarity matching. No API calls needed for dedup.
 
-Supports multiple AI providers (Mistral, Cerebras) via the ai_providers module.
+Optionally uses AI providers (Mistral, Cerebras) for tag keyword generation
+(populates ai_summary for tag UI and tag exclusions).
 """
 
 import hashlib
@@ -22,6 +23,8 @@ from config import (
     AI_PROVIDER,
     DEDUP_MESSAGES_PER_RUN,
     DEDUP_MIN_MESSAGE_LENGTH,
+    EMBEDDING_SIMILARITY_THRESHOLD,
+    EMBEDDING_WINDOW_DAYS,
     MEDIA_DIR,
     validate_config,
 )
@@ -37,8 +40,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Rate limiting
-API_DELAY_SECONDS = 0.5  # Delay between API calls
+# Rate limiting for AI provider (tag generation only)
+API_DELAY_SECONDS = 0.5
 
 
 def get_ai_provider() -> AIProvider | None:
@@ -78,11 +81,8 @@ def get_ai_provider() -> AIProvider | None:
 
 def normalize_keywords(keywords_str: str) -> str:
     """Normalize and sort keywords for consistent hashing."""
-    # Split by comma, strip whitespace, lowercase, remove empty
     keywords = [k.strip().lower() for k in keywords_str.split(',') if k.strip()]
-    # Remove duplicates and sort
     keywords = sorted(set(keywords))
-    # Join back
     return ','.join(keywords)
 
 
@@ -241,22 +241,167 @@ def generate_media_hashes() -> tuple[int, int, int]:
     return (total_processed, total_duplicates, total_skipped)
 
 
-def generate_text_hashes(ai_provider: AIProvider) -> tuple[int, int, int, int]:
-    """Generate AI-based content hashes for text deduplication.
+def generate_text_hashes() -> tuple[int, int, int]:
+    """Generate embedding-based content hashes for text deduplication.
+
+    Uses local sentence-transformer model for semantic similarity.
+    No API calls needed.
 
     Skips messages already marked as duplicates (e.g., from media hashing).
 
     Returns:
-        Tuple of (processed_count, duplicates_found, skipped_count, error_count)
+        Tuple of (processed_count, duplicates_found, skipped_count)
     """
-    logger.info(f"Starting text hash generation using {ai_provider.name}...")
+    from embedding_provider import (
+        encode_batch, embedding_to_bytes, bytes_to_embedding, find_most_similar,
+    )
+    import numpy as np
+
+    logger.info("Starting embedding-based text deduplication...")
 
     total_processed = 0
     total_duplicates = 0
     total_skipped = 0
-    total_errors = 0
 
     # Get channels with dedup enabled
+    with Database() as db:
+        channels = [dict(row) for row in db.get_dedup_channels()]
+
+    if not channels:
+        logger.info("No channels with dedup enabled")
+        return (0, 0, 0)
+
+    logger.info(f"Found {len(channels)} active channels for text deduplication")
+
+    # Group channels by group_id for batch processing
+    groups: dict[int, list[dict]] = {}
+    for channel in channels:
+        gid = channel["group_id"]
+        groups.setdefault(gid, []).append(channel)
+
+    now = int(time.time())
+    window_start = now - (EMBEDDING_WINDOW_DAYS * 86400)
+
+    for group_id, group_channels in groups.items():
+        # Load existing embeddings for this group within the time window
+        with Database() as db:
+            raw_embeddings = db.get_recent_embeddings(group_id, window_start)
+
+        # Deserialize into numpy arrays
+        pool: list[dict] = []
+        for entry in raw_embeddings:
+            pool.append({
+                "channel_id": entry["channel_id"],
+                "message_id": entry["message_id"],
+                "embedding": bytes_to_embedding(entry["embedding"]),
+            })
+
+        logger.info(f"Group {group_id}: loaded {len(pool)} existing embeddings for comparison")
+
+        for channel in group_channels:
+            channel_id = channel["id"]
+            channel_title = channel["title"]
+
+            # Skip short messages
+            with Database() as db:
+                short_ids = db.get_short_messages_for_skip(
+                    channel_id, limit=500, min_length=DEDUP_MIN_MESSAGE_LENGTH
+                )
+                if short_ids:
+                    for msg_id in short_ids:
+                        db.skip_content_hash(channel_id, msg_id)
+                    db.commit()
+                    total_skipped += len(short_ids)
+                    logger.info(f"  {channel_title}: Skipped {len(short_ids)} short messages")
+
+            # Get messages needing hashes
+            with Database() as db:
+                messages = db.get_messages_needing_hashes(
+                    channel_id, limit=DEDUP_MESSAGES_PER_RUN, min_length=DEDUP_MIN_MESSAGE_LENGTH
+                )
+
+            if not messages:
+                continue
+
+            # Filter out already-duplicate messages
+            filtered_messages = []
+            with Database() as db:
+                for msg in messages:
+                    full_msg = db.get_message(channel_id, msg["id"])
+                    if full_msg and full_msg.get("duplicate_of_channel"):
+                        db.skip_content_hash(channel_id, msg["id"])
+                        total_skipped += 1
+                    else:
+                        filtered_messages.append(msg)
+                db.commit()
+
+            if not filtered_messages:
+                continue
+
+            logger.info(f"Encoding {len(filtered_messages)} messages from: {channel_title}")
+
+            # Batch encode all message texts
+            texts = [msg["message"] for msg in filtered_messages]
+            embeddings = encode_batch(texts)
+
+            # Compare each embedding against the pool
+            with Database() as db:
+                for i, msg in enumerate(filtered_messages):
+                    emb = embeddings[i]
+
+                    # Find most similar in pool
+                    match = find_most_similar(emb, pool, EMBEDDING_SIMILARITY_THRESHOLD)
+
+                    # Derive a content_hash from the embedding for debug display
+                    emb_bytes = embedding_to_bytes(emb)
+                    content_hash = hashlib.sha256(emb_bytes).hexdigest()
+
+                    if match:
+                        orig_channel, orig_message = match
+                        db.mark_as_duplicate(channel_id, msg["id"], orig_channel, orig_message)
+                        db.update_content_hash(channel_id, msg["id"], content_hash)
+                        total_duplicates += 1
+                        logger.info(f"  Duplicate: msg {msg['id']} -> channel {orig_channel} msg {orig_message}")
+                    else:
+                        db.update_content_hash(channel_id, msg["id"], content_hash)
+
+                    # Store embedding and add to pool for subsequent matches
+                    db.store_embedding(group_id, channel_id, msg["id"], msg["date"], emb_bytes)
+                    pool.append({
+                        "channel_id": channel_id,
+                        "message_id": msg["id"],
+                        "embedding": emb,
+                    })
+
+                    total_processed += 1
+
+                db.commit()
+
+        # Cleanup old embeddings for this group
+        with Database() as db:
+            deleted = db.cleanup_old_embeddings(window_start)
+            if deleted:
+                logger.info(f"  Cleaned up {deleted} old embeddings")
+            db.commit()
+
+    return (total_processed, total_duplicates, total_skipped)
+
+
+def generate_ai_tags(ai_provider: AIProvider) -> tuple[int, int, int]:
+    """Generate AI keyword tags for messages that have embeddings but no ai_summary.
+
+    This is a separate pass after embedding dedup — populates ai_summary for
+    the tag UI and tag exclusion system.
+
+    Returns:
+        Tuple of (processed_count, skipped_count, error_count)
+    """
+    logger.info(f"Starting AI tag generation using {ai_provider.name}...")
+
+    total_processed = 0
+    total_skipped = 0
+    total_errors = 0
+
     with Database() as db:
         channels = [dict(row) for row in db.get_dedup_channels()]
         exclusion_groups = db.get_all_tag_exclusions()
@@ -265,83 +410,57 @@ def generate_text_hashes(ai_provider: AIProvider) -> tuple[int, int, int, int]:
         logger.info(f"Loaded {len(exclusion_groups)} tag exclusion groups")
 
     if not channels:
-        logger.info("No channels with dedup enabled")
-        return (0, 0, 0, 0)
-
-    logger.info(f"Found {len(channels)} active channels for text deduplication")
+        return (0, 0, 0)
 
     for channel in channels:
         channel_id = channel["id"]
         channel_title = channel["title"]
-        group_id = channel["group_id"]
 
-        # First, skip messages that are too short
+        # Get messages that have been processed (content_hash_pending=0) but have no ai_summary
         with Database() as db:
-            short_ids = db.get_short_messages_for_skip(
-                channel_id, limit=500, min_length=DEDUP_MIN_MESSAGE_LENGTH
-            )
-            if short_ids:
-                for msg_id in short_ids:
-                    db.skip_content_hash(channel_id, msg_id)
-                db.commit()
-                total_skipped += len(short_ids)
-                logger.info(f"  {channel_title}: Skipped {len(short_ids)} short messages")
-
-        # Get messages needing hashes
-        with Database() as db:
-            messages = db.get_messages_needing_hashes(
-                channel_id, limit=DEDUP_MESSAGES_PER_RUN, min_length=DEDUP_MIN_MESSAGE_LENGTH
-            )
+            cursor = db.cursor()
+            try:
+                cursor.execute(f"""
+                    SELECT id, message, date
+                    FROM channel_{channel_id}
+                    WHERE content_hash_pending = 0
+                      AND ai_summary IS NULL
+                      AND (read = 0 OR read IS NULL)
+                      AND message IS NOT NULL
+                      AND length(message) >= ?
+                    ORDER BY date DESC
+                    LIMIT ?
+                """, (DEDUP_MIN_MESSAGE_LENGTH, DEDUP_MESSAGES_PER_RUN))
+                messages = [{"id": row[0], "message": row[1], "date": row[2]}
+                            for row in cursor.fetchall()]
+            except Exception:
+                messages = []
 
         if not messages:
             continue
 
-        logger.info(f"Processing {len(messages)} messages from: {channel_title}")
+        logger.info(f"Generating tags for {len(messages)} messages from: {channel_title}")
 
         for msg in messages:
-            # Check if already marked as duplicate (e.g., from media hashing)
-            with Database() as db:
-                full_msg = db.get_message(channel_id, msg["id"])
-                if full_msg and full_msg.get("duplicate_of_channel"):
-                    # Already a duplicate, skip AI processing but mark content hash as done
-                    db.skip_content_hash(channel_id, msg["id"])
-                    db.commit()
-                    total_skipped += 1
-                    continue
-
-            message_text = msg["message"]
-
-            # Rate limit
             time.sleep(API_DELAY_SECONDS)
 
-            # Generate AI summary via provider
-            ai_summary = ai_provider.generate_summary(message_text)
+            ai_summary = ai_provider.generate_summary(msg["message"])
 
             if not ai_summary:
-                logger.warning(f"  Failed to get summary for message {msg['id']}")
+                logger.warning(f"  Failed to get tags for message {msg['id']}")
                 total_errors += 1
                 continue
 
-            # Treat very short output (less than 3 tokens) as empty
+            # Treat very short output as empty
             tokens = [t for t in ai_summary.strip().split(',') if t.strip()]
-            if len(tokens) < 3:
-                logger.info(f"  Skipping message {msg['id']}: AI returned too few tokens ({len(tokens)}): {ai_summary.strip()}")
-                with Database() as db:
-                    db.skip_content_hash(channel_id, msg["id"])
-                    db.commit()
+            if len(tokens) < 3 and ai_summary.strip().lower() not in ("ad", "advertising"):
                 total_skipped += 1
                 continue
 
             # Skip promotional content
-            if ai_summary.strip().lower() == "ad":
-                with Database() as db:
-                    db.skip_content_hash(channel_id, msg["id"])
-                    db.commit()
+            if ai_summary.strip().lower() in ("ad", "advertising"):
                 total_skipped += 1
                 continue
-
-            # Compute hash from the AI summary
-            content_hash = compute_hash(ai_summary)
 
             # Check tag exclusions - auto-mark as read if matched
             if exclusion_groups and Database.check_tag_exclusions(ai_summary, exclusion_groups):
@@ -352,35 +471,28 @@ def generate_text_hashes(ai_provider: AIProvider) -> tuple[int, int, int, int]:
                         f"UPDATE channel_{channel_id} SET read = 1, read_at = ? WHERE id = ? AND read = 0",
                         (now, msg["id"])
                     )
-                    db.update_content_hash(channel_id, msg["id"], content_hash, ai_summary)
+                    # Update ai_summary only (content_hash already set by embedding pass)
+                    cursor.execute(
+                        f"UPDATE channel_{channel_id} SET ai_summary = ? WHERE id = ?",
+                        (ai_summary, msg["id"])
+                    )
                     db.commit()
                 logger.info(f"  Auto-excluded (tag match): msg {msg['id']}")
                 total_skipped += 1
                 continue
 
-            # Check for duplicates and register
+            # Store the ai_summary for tag display
             with Database() as db:
-                original = db.register_content_hash(
-                    content_hash, channel_id, msg["id"], msg["date"],
-                    group_id=group_id
+                cursor = db.cursor()
+                cursor.execute(
+                    f"UPDATE channel_{channel_id} SET ai_summary = ? WHERE id = ?",
+                    (ai_summary, msg["id"])
                 )
-
-                if original:
-                    # This is a duplicate
-                    db.mark_as_duplicate(channel_id, msg["id"], original[0], original[1])
-                    db.update_content_hash(channel_id, msg["id"], content_hash, ai_summary)
-                    total_duplicates += 1
-                    logger.info(f"  Duplicate: msg {msg['id']} -> channel {original[0]} msg {original[1]}")
-                    logger.info(f"    Summary: {ai_summary[:100]}...")
-                else:
-                    # First occurrence
-                    db.update_content_hash(channel_id, msg["id"], content_hash, ai_summary)
-
                 db.commit()
 
             total_processed += 1
 
-    return (total_processed, total_duplicates, total_skipped, total_errors)
+    return (total_processed, total_skipped, total_errors)
 
 
 def generate_content_hashes() -> None:
@@ -388,10 +500,8 @@ def generate_content_hashes() -> None:
 
     Order of processing:
     1. Media hashes (fast, no API calls)
-    2. Text hashes via AI (slower, requires API)
-
-    Messages already marked as duplicates from media hashing are skipped
-    for text hashing to save API calls.
+    2. Text dedup via embeddings (fast, local model, no API calls)
+    3. AI tag generation (optional, requires API provider)
     """
     logger.info("Starting deduplication hash generation...")
 
@@ -410,21 +520,29 @@ def generate_content_hashes() -> None:
     logger.info(f"  Skipped (no media): {media_skipped}")
     logger.info("=" * 50)
 
-    # Step 2: Text hashing via AI (slower, requires API)
-    ai_provider = get_ai_provider()
-    if not ai_provider:
-        logger.warning("No AI provider configured - skipping text-based deduplication")
-        return
-
-    text_processed, text_duplicates, text_skipped, text_errors = generate_text_hashes(ai_provider)
+    # Step 2: Embedding-based text dedup (fast, local, no API needed)
+    text_processed, text_duplicates, text_skipped = generate_text_hashes()
 
     logger.info("=" * 50)
-    logger.info("Text hash generation completed!")
+    logger.info("Text dedup (embeddings) completed!")
     logger.info(f"  Processed: {text_processed}")
     logger.info(f"  Duplicates found (text): {text_duplicates}")
-    logger.info(f"  Skipped (short/promo/already dup): {text_skipped}")
-    logger.info(f"  Errors: {text_errors}")
+    logger.info(f"  Skipped (short/already dup): {text_skipped}")
     logger.info("=" * 50)
+
+    # Step 3: AI tag generation (optional, if provider configured)
+    ai_provider = get_ai_provider()
+    if ai_provider:
+        tag_processed, tag_skipped, tag_errors = generate_ai_tags(ai_provider)
+
+        logger.info("=" * 50)
+        logger.info("AI tag generation completed!")
+        logger.info(f"  Tagged: {tag_processed}")
+        logger.info(f"  Skipped: {tag_skipped}")
+        logger.info(f"  Errors: {tag_errors}")
+        logger.info("=" * 50)
+    else:
+        logger.info("No AI provider configured - skipping tag generation (dedup still works via embeddings)")
 
 
 if __name__ == "__main__":

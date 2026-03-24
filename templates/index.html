@@ -434,6 +434,13 @@
             color: #888;
         }
 
+        .channel-unsubscribed-badge {
+            font-size: 10px;
+            color: #d32f2f;
+            margin-left: 4px;
+            font-weight: normal;
+        }
+
         .channel-controls {
             display: flex;
             align-items: center;
@@ -507,6 +514,12 @@
 
         .download-all-label input {
             cursor: pointer;
+        }
+
+        .history-complete-badge {
+            font-size: 10px;
+            color: #28a745;
+            margin-left: 2px;
         }
 
         /* Backup path input */
@@ -658,6 +671,33 @@
 
         .message-text a:hover {
             text-decoration: underline;
+        }
+
+        .message-fold-heading {
+            cursor: pointer;
+        }
+
+        .message-fold-heading:hover {
+            opacity: 0.8;
+        }
+
+        .message-fold-arrow {
+            display: inline;
+            color: #999;
+            font-size: 13px;
+            margin-left: 6px;
+        }
+
+        .message-fold-heading:hover .message-fold-arrow {
+            color: #666;
+        }
+
+        .message-fold-body {
+            display: none;
+        }
+
+        .message-fold-body.open {
+            display: block;
         }
 
         .message-media {
@@ -2421,6 +2461,23 @@
             }
         });
 
+        // Jump to next message (Ctrl+Down)
+        document.addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.key === 'ArrowDown') {
+                e.preventDefault();
+                const headerHeight = 56;
+                const scrollY = window.scrollY + headerHeight + 20;
+                const rows = document.querySelectorAll('.message-row');
+                for (const row of rows) {
+                    const top = row.getBoundingClientRect().top + window.scrollY;
+                    if (top > scrollY) {
+                        window.scrollTo({ top: top - headerHeight - 16, behavior: 'smooth' });
+                        break;
+                    }
+                }
+            }
+        });
+
         // Delegate click events for message media images (not video thumbnails)
         document.addEventListener('click', (e) => {
             const img = e.target.closest('.message-media img');
@@ -3272,13 +3329,23 @@
             const feed = document.querySelector('.feed');
             if (!feed) return;
 
+            // Use insertAdjacentHTML to avoid re-parsing entire feed
+            const countBefore = feed.querySelectorAll(':scope > .message-row').length;
+            let html = '';
             for (const msg of newMessages) {
-                feed.innerHTML += renderMessage(msg);
+                html += renderMessage(msg);
             }
+            feed.insertAdjacentHTML('beforeend', html);
 
-            // Re-setup observers and handlers for new elements
-            setupScrollObserver();
-            setupActionButtons();
+            // Setup observers and handlers for newly added elements only
+            const allRows = feed.querySelectorAll(':scope > .message-row');
+            const newElements = Array.from(allRows).slice(countBefore);
+            newElements.forEach(el => {
+                if (currentObserver) {
+                    el.querySelectorAll('.message-card').forEach(card => currentObserver.observe(card));
+                }
+            });
+            setupActionButtonsForElements(newElements);
         }
 
         // Load earlier messages manually (when clicking the button on empty feed)
@@ -3385,6 +3452,12 @@
                 if (isAtBottom() && currentGroupId && !showingBookmarks) {
                     markVisibleMessagesAsRead();
                 }
+
+                // Fallback: mark messages scrolled above viewport as read (mobile momentum scrolling fix)
+                scheduleMarkScrolledPastAsRead();
+
+                // Schedule purge of messages scrolled far above viewport
+                schedulePurge();
             });
         }
 
@@ -3407,6 +3480,62 @@
             });
         }
 
+        // Fallback: mark all messages scrolled above viewport as read (catches what IntersectionObserver misses on mobile momentum scrolling)
+        let markReadTimer = null;
+        function scheduleMarkScrolledPastAsRead() {
+            if (markReadTimer) clearTimeout(markReadTimer);
+            markReadTimer = setTimeout(markScrolledPastMessagesAsRead, 300);
+        }
+
+        function markScrolledPastMessagesAsRead() {
+            if (!currentGroupId || showingBookmarks) return;
+
+            const feed = document.querySelector('.feed');
+            if (!feed) return;
+
+            const rows = feed.querySelectorAll(':scope > .message-row');
+            for (const row of rows) {
+                const rect = row.getBoundingClientRect();
+                if (rect.bottom >= 56) break; // row is in or below viewport, stop
+
+                const card = row.querySelector('.message-card');
+                if (!card) continue;
+
+                const dataSource = card.classList.contains('variants-carousel') ? row : card;
+
+                const variantsData = dataSource.dataset.variants;
+                if (variantsData) {
+                    try {
+                        const variants = JSON.parse(variantsData);
+                        const allMessages = [];
+                        variants.forEach(v => {
+                            const albumIds = v.album_ids || [v.message_id];
+                            albumIds.forEach(msgId => {
+                                const key = `${v.channel_id}-${msgId}`;
+                                if (!readMessages.has(key)) {
+                                    readMessages.add(key);
+                                    allMessages.push({channel_id: v.channel_id, message_id: msgId});
+                                }
+                            });
+                        });
+                        if (allMessages.length > 0) {
+                            markMultipleMessagesAsRead(allMessages);
+                        }
+                    } catch (e) {}
+                } else {
+                    const channelId = parseInt(dataSource.dataset.channelId);
+                    const albumIds = (dataSource.dataset.albumIds || '').split(',').map(id => parseInt(id));
+                    const key = `${channelId}-${albumIds.join('-')}`;
+                    const isAlreadyRead = dataSource.dataset.read === '1';
+
+                    if (!isAlreadyRead && !readMessages.has(key)) {
+                        readMessages.add(key);
+                        markAlbumAsRead(channelId, albumIds);
+                    }
+                }
+            }
+        }
+
         // Check if content fits on screen without scrolling, and if so mark visible as read
         function checkIfNoScrollNeeded() {
             if (!currentGroupId || showingBookmarks) return;
@@ -3419,6 +3548,85 @@
                     markVisibleMessagesAsRead();
                 }
             }, 100);
+        }
+
+        // Auto-purge: remove messages scrolled far above viewport to free memory
+        const PURGE_DISTANCE = 3000; // pixels above viewport before purging
+        const PURGE_MIN_KEEP = 10;   // always keep at least this many messages in DOM
+        let purgeTimer = null;
+
+        function schedulePurge() {
+            if (purgeTimer || showingBookmarks || showingSearch) return;
+            purgeTimer = setTimeout(() => {
+                purgeTimer = null;
+                purgeDistantMessages();
+            }, 2000);
+        }
+
+        function purgeDistantMessages() {
+            const feed = document.querySelector('.feed');
+            if (!feed) return;
+
+            const rows = Array.from(feed.querySelectorAll(':scope > .message-row'));
+            if (rows.length <= PURGE_MIN_KEEP) return;
+
+            const maxRemovable = rows.length - PURGE_MIN_KEEP;
+            const viewportTop = window.scrollY;
+            const purgeThreshold = viewportTop - PURGE_DISTANCE;
+
+            // Find contiguous rows from the top that are far above viewport
+            let removeCount = 0;
+            for (let i = 0; i < maxRemovable; i++) {
+                const rect = rows[i].getBoundingClientRect();
+                const absoluteBottom = rect.bottom + viewportTop;
+                if (absoluteBottom < purgeThreshold) {
+                    removeCount++;
+                } else {
+                    break;
+                }
+            }
+
+            if (removeCount === 0) return;
+
+            // Measure height: from top of first removed row to top of first kept row
+            // This includes all flex gaps between removed elements
+            const firstRect = rows[0].getBoundingClientRect();
+            const lastKeptRect = rows[removeCount].getBoundingClientRect();
+            const removedHeight = lastKeptRect.top - firstRect.top;
+
+            // Check if there's already a spacer at the top
+            let spacer = feed.querySelector(':scope > .purge-spacer');
+
+            // Unobserve and remove DOM elements
+            for (let i = 0; i < removeCount; i++) {
+                const row = rows[i];
+                if (currentObserver) {
+                    row.querySelectorAll('.message-card').forEach(card => currentObserver.unobserve(card));
+                }
+                row.remove();
+            }
+
+            // Replace removed elements with a height-preserving spacer (no layout shift)
+            if (spacer) {
+                // Grow existing spacer
+                spacer.style.height = (parseFloat(spacer.style.height) + removedHeight) + 'px';
+            } else {
+                spacer = document.createElement('div');
+                spacer.className = 'purge-spacer';
+                spacer.style.height = removedHeight + 'px';
+                feed.insertBefore(spacer, feed.firstChild);
+            }
+
+            // Remove from messages array
+            messages.splice(0, removeCount);
+
+            // Update earliest date
+            if (messages.length > 0) {
+                earliestDate = Math.min(...messages.map(m => m.date || Infinity));
+            }
+
+            // Allow loading earlier messages again (they can be re-fetched if user scrolls back up)
+            noMoreEarlierMessages = false;
         }
 
         // Initialize scroll listener once
@@ -3675,6 +3883,19 @@
                     });
                 }
 
+                // Fold toggle handler — entire heading is clickable
+                el.querySelectorAll('.message-fold-heading').forEach(heading => {
+                    heading.addEventListener('click', (e) => {
+                        if (e.target.closest('a')) return; // don't interfere with links
+                        const body = heading.nextElementSibling;
+                        if (body && body.classList.contains('message-fold-body')) {
+                            const isOpen = body.classList.toggle('open');
+                            const arrow = heading.querySelector('.message-fold-arrow');
+                            if (arrow) arrow.textContent = isOpen ? '\u25B2' : '\u25BC';
+                        }
+                    });
+                });
+
                 // Load reply message content
                 const replyEl = el.querySelector('.message-reply[data-reply-to]');
                 if (replyEl) {
@@ -3825,12 +4046,14 @@
             }
 
             let textHtml = escapeHtml(msg.message || '');
+            let parsedEntities = null;
             if (msg.entities) {
                 try {
-                    const entities = typeof msg.entities === 'string' ? JSON.parse(msg.entities) : msg.entities;
-                    textHtml = applyEntities(msg.message || '', entities);
+                    parsedEntities = typeof msg.entities === 'string' ? JSON.parse(msg.entities) : msg.entities;
+                    textHtml = applyEntities(msg.message || '', parsedEntities);
                 } catch (e) {}
             }
+            textHtml = applyFold(textHtml, msg.message || '', parsedEntities);
 
             // Render media
             let mediaHtml = '';
@@ -4062,14 +4285,16 @@
 
             let textHtml = escapeHtml(msg.message || '');
             // Apply entities (links, formatting)
+            let parsedEntities2 = null;
             if (msg.entities) {
                 try {
-                    const entities = typeof msg.entities === 'string' ? JSON.parse(msg.entities) : msg.entities;
-                    textHtml = applyEntities(msg.message || '', entities);
+                    parsedEntities2 = typeof msg.entities === 'string' ? JSON.parse(msg.entities) : msg.entities;
+                    textHtml = applyEntities(msg.message || '', parsedEntities2);
                 } catch (e) {
                     // Keep escaped text if parsing fails
                 }
             }
+            textHtml = applyFold(textHtml, msg.message || '', parsedEntities2);
 
             // Render media (album or single)
             let mediaHtml = '';
@@ -4467,6 +4692,96 @@
                 // Fallback to regular video element
                 return `<div class="message-media"><video src="${mediaUrl}" controls muted preload="metadata" onloadedmetadata="handleVideoMetadata(this)"></video></div>`;
             }
+        }
+
+        // Check if the first paragraph of a message is entirely bold.
+        // Returns { headingEnd } with the UTF-16 end offset, or null.
+        function detectBoldHeading(text, entities) {
+            if (!text || !entities) return null;
+            const breakIdx = text.indexOf('\n\n');
+            if (breakIdx <= 0) return null; // Need a paragraph break with content after it
+            if (breakIdx >= text.length - 2) return null; // Nothing after the break
+
+            const firstPara = text.substring(0, breakIdx);
+            // First paragraph must be non-trivial
+            if (firstPara.trim().length < 3) return null;
+
+            // Collect bold coverage over the first paragraph (UTF-16 offsets)
+            const boldRanges = [];
+            for (const e of entities) {
+                if (e.type === 'MessageEntityBold') {
+                    const start = Math.max(e.offset, 0);
+                    const end = Math.min(e.offset + e.length, breakIdx);
+                    if (start < end) boldRanges.push([start, end]);
+                }
+            }
+            if (boldRanges.length === 0) return null;
+
+            // Merge overlapping ranges and check full coverage of non-whitespace
+            boldRanges.sort((a, b) => a[0] - b[0]);
+            const merged = [boldRanges[0]];
+            for (let i = 1; i < boldRanges.length; i++) {
+                const last = merged[merged.length - 1];
+                if (boldRanges[i][0] <= last[1]) {
+                    last[1] = Math.max(last[1], boldRanges[i][1]);
+                } else {
+                    merged.push(boldRanges[i]);
+                }
+            }
+
+            // Check every non-whitespace char in first paragraph is covered by bold
+            for (let i = 0; i < breakIdx; i++) {
+                if (/\s/.test(text[i])) continue;
+                const covered = merged.some(r => i >= r[0] && i < r[1]);
+                if (!covered) return null;
+            }
+
+            return { headingEnd: breakIdx };
+        }
+
+        // Wrap message-text HTML with fold if message has a bold heading paragraph.
+        // textHtml is the fully rendered HTML, text/entities are the raw message data.
+        function applyFold(textHtml, text, entities) {
+            const heading = detectBoldHeading(text, entities);
+            if (!heading) return textHtml;
+
+            // Split rendered HTML at the first \n\n boundary.
+            // In the rendered HTML, \n are preserved literally (white-space: pre-wrap).
+            // Find the first occurrence of \n\n in the HTML that's not inside a tag.
+            let depth = 0;
+            let nlCount = 0;
+            let splitPos = -1;
+            for (let i = 0; i < textHtml.length; i++) {
+                const ch = textHtml[i];
+                if (ch === '<') { depth++; nlCount = 0; continue; }
+                if (ch === '>') { depth--; nlCount = 0; continue; }
+                if (depth > 0) { continue; }
+                if (ch === '\n') {
+                    nlCount++;
+                    if (nlCount >= 2) {
+                        splitPos = i - 1; // position of first \n
+                        break;
+                    }
+                } else {
+                    nlCount = 0;
+                }
+            }
+
+            if (splitPos < 0) return textHtml;
+
+            // Walk backwards from splitPos to close any open tags, and forwards to find body start
+            const headingHtml = textHtml.substring(0, splitPos);
+            // Find end of the \n\n sequence
+            let bodyStart = splitPos;
+            while (bodyStart < textHtml.length && textHtml[bodyStart] === '\n') bodyStart++;
+            const bodyHtml = textHtml.substring(bodyStart);
+
+            if (!bodyHtml.trim()) return textHtml;
+
+            return '<span class="message-fold-heading" title="Click to expand">' +
+                headingHtml +
+                '<span class="message-fold-arrow">\u25BC</span></span>' +
+                '<div class="message-fold-body">\n' + bodyHtml + '</div>';
         }
 
         // Apply entities to message text
@@ -4979,6 +5294,19 @@
                 });
             });
 
+            // Fold toggle handlers — entire heading is clickable
+            document.querySelectorAll('.message-fold-heading').forEach(heading => {
+                heading.addEventListener('click', (e) => {
+                    if (e.target.closest('a')) return;
+                    const body = heading.nextElementSibling;
+                    if (body && body.classList.contains('message-fold-body')) {
+                        const isOpen = body.classList.toggle('open');
+                        const arrow = heading.querySelector('.message-fold-arrow');
+                        if (arrow) arrow.textContent = isOpen ? '\u25B2' : '\u25BC';
+                    }
+                });
+            });
+
             // Load reply message content
             loadReplyMessages();
         }
@@ -5381,9 +5709,10 @@
 
             // Channel name is clickable if it has a group
             // Add debug channel ID that shows in debug mode
+            const unsubBadge = !channel.subscribed ? '<span class="channel-unsubscribed-badge" title="No longer in Telegram">\u2716</span>' : '';
             const channelNameHtml = hasGroup
-                ? `<a class="channel-name channel-name-link" data-channel-id="${channel.id}">${escapeHtml(channel.title)}<span class="debug-channel-id">[${channel.id}]</span></a>`
-                : `<div class="channel-name">${escapeHtml(channel.title)}<span class="debug-channel-id">[${channel.id}]</span></div>`;
+                ? `<a class="channel-name channel-name-link" data-channel-id="${channel.id}">${escapeHtml(channel.title)}${unsubBadge}<span class="debug-channel-id">[${channel.id}]</span></a>`
+                : `<div class="channel-name">${escapeHtml(channel.title)}${unsubBadge}<span class="debug-channel-id">[${channel.id}]</span></div>`;
 
             return `
                 <div class="channel-item${isSelected ? ' selected' : ''}" data-channel-id="${channel.id}">
@@ -5403,7 +5732,7 @@
                         </label>
                         <label class="download-all-label" title="Download full history">
                             <input type="checkbox" class="download-all-toggle" data-channel-id="${channel.id}" ${channel.download_all ? 'checked' : ''}>
-                            All
+                            All${channel.download_all && channel.history_complete ? '<span class="history-complete-badge" title="History download complete">\u2714</span>' : ''}
                         </label>
                         <select class="group-select" data-channel-id="${channel.id}">
                             ${groupOptions}

@@ -3,6 +3,8 @@
 import asyncio
 import json
 import logging
+import socket
+import threading
 import time
 from bottle import Bottle, request, response, static_file, TEMPLATE_PATH
 from pathlib import Path
@@ -25,6 +27,51 @@ TEMPLATE_DIR.mkdir(exist_ok=True)
 
 # Static files directory
 STATIC_DIR = TEMPLATE_DIR / "static"
+
+
+def _delete_message_media(db, channel_id, message_id):
+    """Delete media files from disk for a message (and its album if grouped)."""
+    table_name = f"channel_{channel_id}"
+    cursor = db.cursor()
+    try:
+        cursor.execute(
+            f"SELECT id, media_path, video_thumbnail_path, grouped_id FROM {table_name} WHERE id = ?",
+            (message_id,),
+        )
+        msg = cursor.fetchone()
+        if not msg:
+            return
+        # Collect all message IDs to process (album or single)
+        grouped_id = msg["grouped_id"]
+        if grouped_id:
+            cursor.execute(
+                f"SELECT id, media_path, video_thumbnail_path FROM {table_name} WHERE grouped_id = ?",
+                (grouped_id,),
+            )
+            rows = cursor.fetchall()
+        else:
+            rows = [msg]
+        # Delete files and clear DB paths
+        msg_ids = []
+        for row in rows:
+            msg_ids.append(row["id"])
+            for path_col in ("media_path", "video_thumbnail_path"):
+                rel_path = row[path_col]
+                if rel_path:
+                    full_path = MEDIA_DIR / rel_path
+                    if full_path.exists():
+                        try:
+                            full_path.unlink()
+                        except OSError as e:
+                            logger.warning(f"Failed to delete {full_path}: {e}")
+        if msg_ids:
+            placeholders = ",".join("?" * len(msg_ids))
+            cursor.execute(
+                f"UPDATE {table_name} SET media_path = NULL, video_thumbnail_path = NULL WHERE id IN ({placeholders})",
+                msg_ids,
+            )
+    except Exception:
+        logger.exception(f"Error deleting media for channel {channel_id} message {message_id}")
 
 
 @app.route("/")
@@ -790,7 +837,7 @@ def anchor_message():
 
 @app.route("/api/message/hide", method="POST")
 def hide_message():
-    """Set message hidden status."""
+    """Set message hidden status. When hiding, delete media from disk."""
     response.content_type = "application/json"
     data = request.json
     channel_id = int(data.get("channel_id"))
@@ -798,6 +845,8 @@ def hide_message():
     hidden = int(data.get("hidden", 0))  # 0 or 1
     with Database() as db:
         db.update_message_hidden(channel_id, message_id, hidden)
+        if hidden:
+            _delete_message_media(db, channel_id, message_id)
         db.commit()
     return json.dumps({"success": True})
 
@@ -919,11 +968,112 @@ def search_stats():
         return json.dumps(stats)
 
 
+def get_local_ips():
+    """Get all non-loopback IPv4 addresses on this machine."""
+    ips = []
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            addr = info[4][0]
+            if not addr.startswith("127."):
+                ips.append(addr)
+    except socket.gaierror:
+        pass
+    # Deduplicate while preserving order
+    seen = set()
+    return [ip for ip in ips if not (ip in seen or seen.add(ip))]
+
+
+class MDNSAnnouncer:
+    """Announces TGFeed on the local network via mDNS and tracks IP changes."""
+
+    MDNS_NAME = "tgfeed"
+    CHECK_INTERVAL = 10  # seconds between IP change checks
+
+    def __init__(self, port):
+        self.port = port
+        self._zeroconf = None
+        self._info = None
+        self._current_ips = []
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self):
+        try:
+            from zeroconf import Zeroconf, ServiceInfo
+        except ImportError:
+            logger.warning("zeroconf not installed, mDNS disabled")
+            return
+
+        self._current_ips = get_local_ips()
+        if not self._current_ips:
+            logger.warning("No local IPs found, mDNS disabled")
+            return
+
+        self._register(self._current_ips)
+        self._thread = threading.Thread(target=self._watch_loop, daemon=True)
+        self._thread.start()
+
+    def _register(self, ips):
+        from zeroconf import Zeroconf, ServiceInfo
+        import socket as _socket
+
+        packed = [_socket.inet_aton(ip) for ip in ips]
+        self._info = ServiceInfo(
+            "_http._tcp.local.",
+            f"{self.MDNS_NAME}._http._tcp.local.",
+            addresses=packed,
+            port=self.port,
+            properties={"path": "/"},
+            server=f"{self.MDNS_NAME}.local.",
+        )
+        self._zeroconf = Zeroconf()
+        self._zeroconf.register_service(self._info)
+        logger.info(f"mDNS: registered http://{self.MDNS_NAME}.local:{self.port} on {ips}")
+
+    def _unregister(self):
+        if self._zeroconf and self._info:
+            try:
+                self._zeroconf.unregister_service(self._info)
+            except Exception:
+                pass
+            try:
+                self._zeroconf.close()
+            except Exception:
+                pass
+            self._zeroconf = None
+            self._info = None
+
+    def _watch_loop(self):
+        while not self._stop.wait(self.CHECK_INTERVAL):
+            new_ips = get_local_ips()
+            if set(new_ips) != set(self._current_ips):
+                logger.info(f"mDNS: IP change detected {self._current_ips} -> {new_ips}")
+                self._unregister()
+                self._current_ips = new_ips
+                if new_ips:
+                    self._register(new_ips)
+
+    def stop(self):
+        self._stop.set()
+        self._unregister()
+
+
 def main():
     """Run the web server."""
     DatabaseMigration().migrate()
+
+    local_ips = get_local_ips()
     print(f"Starting TGFeed Web UI at http://{WEB_HOST}:{WEB_PORT}")
-    app.run(host=WEB_HOST, port=WEB_PORT, server="waitress")
+    for ip in local_ips:
+        print(f"  Local: http://{ip}:{WEB_PORT}")
+
+    mdns = MDNSAnnouncer(WEB_PORT)
+    mdns.start()
+
+    try:
+        app.run(host=WEB_HOST, port=WEB_PORT, server="waitress")
+    finally:
+        mdns.stop()
 
 
 if __name__ == "__main__":

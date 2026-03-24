@@ -38,11 +38,12 @@ from config import (
 )
 from database import Database, DatabaseMigration
 
-# Configure logging
+# Configure logging - use UTF-8 stream to handle non-ASCII filenames on Windows
+_log_stream = open(sys.stdout.fileno(), mode='w', encoding='utf-8', errors='replace', closefd=False)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
+    handlers=[logging.StreamHandler(_log_stream)],
 )
 logger = logging.getLogger(__name__)
 logging.getLogger("telethon").setLevel(logging.WARNING)
@@ -469,32 +470,34 @@ class TelegramDaemon:
         client = self._get_client(client_id)
         input_channel = InputChannel(channel_id, access_hash)
 
-        # Get the message first
-        logger.info(f"download_media: getting message...")
-        msgs = await client.get_messages(input_channel, ids=[message_id])
-        if not msgs or not msgs[0]:
-            logger.warning(f"download_media: message not found")
-            return {"path": None, "error": "Message not found"}
-
-        msg = msgs[0]
-        if not msg.media:
-            logger.warning(f"download_media: no media in message")
-            return {"path": None, "error": "No media in message"}
-
-        # Create destination directory
-        dest_path = Path(dest_dir)
-        channel_dest = dest_path / str(channel_id)
-        channel_dest.mkdir(parents=True, exist_ok=True)
-
-        # Download from Telegram with progress logging
-        def progress_callback(received, total):
-            if total:
-                pct = received * 100 // total
-                logger.info(f"download_media: progress {received}/{total} ({pct}%)")
-            else:
-                logger.info(f"download_media: received {received} bytes")
-
         try:
+            # Get the message first
+            msgs = await client.get_messages(input_channel, ids=[message_id])
+            if not msgs or not msgs[0]:
+                logger.warning(f"download_media: message not found")
+                return {"path": None, "error": "Message not found"}
+
+            msg = msgs[0]
+            if not msg.media:
+                logger.warning(f"download_media: no media in message")
+                return {"path": None, "error": "No media in message"}
+
+            # Create destination directory
+            dest_path = Path(dest_dir)
+            channel_dest = dest_path / str(channel_id)
+            channel_dest.mkdir(parents=True, exist_ok=True)
+
+            # Download from Telegram with throttled progress logging
+            last_pct = -10  # Track last logged percentage
+
+            def progress_callback(received, total):
+                nonlocal last_pct
+                if total:
+                    pct = received * 100 // total
+                    if pct >= last_pct + 10 or pct == 100:
+                        logger.info(f"download_media: {pct}% ({received}/{total})")
+                        last_pct = pct
+
             logger.info(f"download_media: starting download to {channel_dest}")
             path = await client.download_media(msg, file=channel_dest, progress_callback=progress_callback)
             if path:
@@ -505,7 +508,7 @@ class TelegramDaemon:
             logger.warning(f"download_media: download returned None")
             return {"path": None, "error": "Download returned None"}
         except Exception as e:
-            logger.error(f"Failed to download media: {e}")
+            logger.error(f"download_media failed: {e}")
             return {"path": None, "error": str(e)}
 
     async def _rpc_get_media_hash(self, channel_id: int, access_hash: int,
@@ -525,30 +528,30 @@ class TelegramDaemon:
         client = self._get_client(client_id)
         input_channel = InputChannel(channel_id, access_hash)
 
-        # Get the message
-        msgs = await client.get_messages(input_channel, ids=[message_id])
-        if not msgs or not msgs[0]:
-            return {"error": "Message not found"}
-
-        msg = msgs[0]
-        if not msg.media:
-            return {"error": "No media in message"}
-
-        # Get file size
-        file_size = get_media_file_size(msg)
-        if file_size is None:
-            return {"error": "Cannot determine file size"}
-
-        # Small files don't need hash matching
-        if file_size <= HASH_SIZE_THRESHOLD:
-            return {
-                "size": file_size,
-                "hash": None,
-                "needs_hash": False
-            }
-
-        # Download first 64KB and compute hash
         try:
+            # Get the message
+            msgs = await client.get_messages(input_channel, ids=[message_id])
+            if not msgs or not msgs[0]:
+                return {"error": "Message not found"}
+
+            msg = msgs[0]
+            if not msg.media:
+                return {"error": "No media in message"}
+
+            # Get file size
+            file_size = get_media_file_size(msg)
+            if file_size is None:
+                return {"error": "Cannot determine file size"}
+
+            # Small files don't need hash matching
+            if file_size <= HASH_SIZE_THRESHOLD:
+                return {
+                    "size": file_size,
+                    "hash": None,
+                    "needs_hash": False
+                }
+
+            # Download first 64KB and compute hash
             chunks = []
             bytes_read = 0
 
@@ -567,7 +570,7 @@ class TelegramDaemon:
                 "needs_hash": True
             }
         except Exception as e:
-            logger.error(f"Failed to get media hash: {e}")
+            logger.error(f"get_media_hash failed: {e}")
             return {"error": str(e)}
 
     async def _rpc_send_read_acknowledge(self, channel_id: int, access_hash: int,

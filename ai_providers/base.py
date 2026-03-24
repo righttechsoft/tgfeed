@@ -18,7 +18,7 @@ RULES:
 9. Sort alphabetically
 10. Translate everything to English
 
-For ads/promos with no news, respond: ad
+For ads/promos with no news, respond: advertising
 
 Examples:
 Input: "BREAKING: Tesla CEO Elon Musk announced buying Twitter for $44 billion!"
@@ -34,7 +34,7 @@ Input: "Netanyahu meets Biden in Washington to discuss Gaza ceasefire"
 Output: biden, ceasefire, gaza, meet, netanyahu, washington
 
 Input: "Subscribe for more updates! Like and share!"
-Output: ad"""
+Output: advertising"""
 
 
 class AIProvider(ABC):

@@ -707,23 +707,51 @@ class Orchestrator:
                 self.stop_script(script.name)
 
     def start_all(self):
-        """Start all daemons, chains, and the history script."""
-        # Start both daemons first
-        for script in self.get_script_list():
-            if script.script_type == ScriptType.DAEMON and not script.is_running:
-                self.start_script(script.name)
+        """Start all daemons, chains, and the history script with staggered launches."""
+        thread = threading.Thread(target=self._start_all_staggered, daemon=True)
+        thread.start()
 
-        # Give daemons time to start
-        time.sleep(1)
+    def _start_all_staggered(self):
+        """Staggered launch sequence (runs in thread)."""
+        # 1. Telegram daemon
+        daemon = self.scripts.get("daemon")
+        if daemon and not daemon.is_running:
+            self.start_script("daemon")
+            time.sleep(2)
 
-        # Start both chains
-        for chain in self.get_chain_list():
-            if not chain.active:
-                self.start_chain(chain.name)
+        if not self.running:
+            return
 
-        # Start history script
-        history_script = self.scripts.get("history")
-        if history_script and not history_script.is_running:
+        # 2. Web server
+        web = self.scripts.get("web")
+        if web and not web.is_running:
+            self.start_script("web")
+            time.sleep(3)
+
+        if not self.running:
+            return
+
+        # 3. Sync chain
+        sync_chain = self.chains.get("sync")
+        if sync_chain and not sync_chain.active:
+            self.start_chain("sync")
+            time.sleep(3)
+
+        if not self.running:
+            return
+
+        # 4. Maintenance chain
+        maint_chain = self.chains.get("maintenance")
+        if maint_chain and not maint_chain.active:
+            self.start_chain("maintenance")
+            time.sleep(3)
+
+        if not self.running:
+            return
+
+        # 5. History script
+        history = self.scripts.get("history")
+        if history and not history.is_running:
             self.start_script("history")
 
     def _get_key_windows(self) -> str | None:

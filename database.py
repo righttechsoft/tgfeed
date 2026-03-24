@@ -1,12 +1,38 @@
 """Database module for TGFeed using SQLite."""
 
 import logging
+import random
 import sqlite3
 import time
 
 from config import DATABASE_PATH
 
 logger = logging.getLogger(__name__)
+
+# Retry settings for "database is locked" errors
+_LOCKED_MAX_RETRIES = 10
+_LOCKED_BASE_DELAY = 0.5  # seconds
+_LOCKED_MAX_DELAY = 10.0  # seconds
+
+
+def _retry_on_locked(func, *args, **kwargs):
+    """Retry a database operation when the database is locked.
+
+    Uses exponential backoff with jitter.
+    """
+    for attempt in range(_LOCKED_MAX_RETRIES):
+        try:
+            return func(*args, **kwargs)
+        except sqlite3.OperationalError as e:
+            if "database is locked" not in str(e):
+                raise
+            if attempt == _LOCKED_MAX_RETRIES - 1:
+                logger.error(f"Database still locked after {_LOCKED_MAX_RETRIES} retries, giving up")
+                raise
+            delay = min(_LOCKED_BASE_DELAY * (2 ** attempt), _LOCKED_MAX_DELAY)
+            delay *= 0.5 + random.random()  # jitter
+            logger.warning(f"Database is locked, retrying in {delay:.1f}s (attempt {attempt + 1}/{_LOCKED_MAX_RETRIES})")
+            time.sleep(delay)
 
 
 class DatabaseMigration:
@@ -19,8 +45,9 @@ class DatabaseMigration:
         """Run all migrations."""
         logger.info("Running database migrations...")
 
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000")
         try:
             cursor = conn.cursor()
             self._create_channels_table(cursor)
@@ -32,10 +59,11 @@ class DatabaseMigration:
             self._add_column(cursor, "channels", "download_videos", "INTEGER DEFAULT 1")
             self._add_column(cursor, "channels", "download_audio", "INTEGER DEFAULT 1")
             self._add_column(cursor, "channels", "download_other", "INTEGER DEFAULT 1")
+            self._add_column(cursor, "channels", "history_complete", "INTEGER DEFAULT 0")
             # Deduplication flag on groups - only process channels in groups with dedup=1
             self._add_column(cursor, "groups", "dedup", "INTEGER DEFAULT 0")
             self._migrate_channel_tables(cursor)
-            conn.commit()
+            _retry_on_locked(conn.commit)
             logger.info("Database migrations completed")
         finally:
             conn.close()
@@ -102,6 +130,9 @@ class DatabaseMigration:
 
         # Create tag_exclusions table for tag-based message exclusion
         self._create_tag_exclusions_table(cursor)
+
+        # Create content_embeddings table for semantic deduplication
+        self._create_content_embeddings_table(cursor)
 
         # Create FTS5 table for full-text search
         self._create_fts_table(cursor)
@@ -219,6 +250,26 @@ class DatabaseMigration:
             )
         """)
 
+    def _create_content_embeddings_table(self, cursor) -> None:
+        """Create the content_embeddings table for semantic deduplication."""
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS content_embeddings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                message_date INTEGER NOT NULL,
+                embedding BLOB NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+        """)
+        self._create_index_if_not_exists(
+            cursor, "content_embeddings", "group_date", ["group_id", "message_date"]
+        )
+        self._create_index_if_not_exists(
+            cursor, "content_embeddings", "channel_message", ["channel_id", "message_id"]
+        )
+
     def _create_fts_table(self, cursor) -> None:
         """Create FTS5 virtual table for full-text search with trigram tokenizer."""
         # Check if FTS5 table already exists
@@ -246,28 +297,18 @@ class DatabaseMigration:
         logger.info("Created FTS5 search index table")
 
 
-class _DebugCursor:
-    """Wrapper around sqlite3.Cursor that logs queries and execution time."""
+class _RetryCursor:
+    """Wrapper around sqlite3.Cursor that retries on 'database is locked'."""
 
     def __init__(self, cursor: sqlite3.Cursor):
         self._cursor = cursor
 
     def execute(self, sql, parameters=()):
-        short = sql.strip().replace('\n', ' ')
-        short = ' '.join(short.split())[:200]
-        start = time.perf_counter()
-        result = self._cursor.execute(sql, parameters)
-        elapsed_ms = (time.perf_counter() - start) * 1000
-        logger.info(f"[SQL {elapsed_ms:.1f}ms] {short}")
+        _retry_on_locked(self._cursor.execute, sql, parameters)
         return self
 
     def executemany(self, sql, seq_of_parameters):
-        short = sql.strip().replace('\n', ' ')
-        short = ' '.join(short.split())[:200]
-        start = time.perf_counter()
-        result = self._cursor.executemany(sql, seq_of_parameters)
-        elapsed_ms = (time.perf_counter() - start) * 1000
-        logger.info(f"[SQL {elapsed_ms:.1f}ms] {short}")
+        _retry_on_locked(self._cursor.executemany, sql, seq_of_parameters)
         return self
 
     def fetchone(self):
@@ -289,6 +330,28 @@ class _DebugCursor:
         return self._cursor.description
 
 
+class _DebugCursor(_RetryCursor):
+    """Wrapper that adds query logging on top of retry logic."""
+
+    def execute(self, sql, parameters=()):
+        short = sql.strip().replace('\n', ' ')
+        short = ' '.join(short.split())[:200]
+        start = time.perf_counter()
+        _retry_on_locked(self._cursor.execute, sql, parameters)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        logger.info(f"[SQL {elapsed_ms:.1f}ms] {short}")
+        return self
+
+    def executemany(self, sql, seq_of_parameters):
+        short = sql.strip().replace('\n', ' ')
+        short = ' '.join(short.split())[:200]
+        start = time.perf_counter()
+        _retry_on_locked(self._cursor.executemany, sql, seq_of_parameters)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        logger.info(f"[SQL {elapsed_ms:.1f}ms] {short}")
+        return self
+
+
 class Database:
     """Database connection and operations."""
 
@@ -300,24 +363,24 @@ class Database:
         self.conn = None
 
     def __enter__(self) -> "Database":
-        self.conn = sqlite3.connect(self.db_path, timeout=10.0)
+        self.conn = sqlite3.connect(self.db_path, timeout=30.0)
         self.conn.row_factory = sqlite3.Row
         # Enable WAL mode for better concurrency
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA cache_size=-65536")  # 64MB cache
-        self.conn.execute("PRAGMA busy_timeout=10000")  # 10s busy timeout
+        self.conn.execute("PRAGMA busy_timeout=30000")  # 30s busy timeout
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         if self.conn:
             self.conn.close()
 
-    def cursor(self) -> "_DebugCursor | sqlite3.Cursor":
-        """Return a cursor, optionally wrapped for debug logging."""
+    def cursor(self) -> "_RetryCursor":
+        """Return a cursor wrapped with retry-on-locked logic."""
         c = self.conn.cursor()
         if self.DEBUG_QUERIES:
             return _DebugCursor(c)
-        return c
+        return _RetryCursor(c)
 
     def get_subscribed_channel_ids(self) -> set[int]:
         """Get all channel IDs currently marked as subscribed."""
@@ -586,7 +649,7 @@ class Database:
 
     def commit(self) -> None:
         if self.conn:
-            self.conn.commit()
+            _retry_on_locked(self.conn.commit)
 
     # Web UI methods
 
@@ -665,6 +728,14 @@ class Database:
             (download_all, channel_id)
         )
 
+    def update_channel_history_complete(self, channel_id: int, history_complete: int) -> None:
+        """Update channel history_complete flag."""
+        cursor = self.cursor()
+        cursor.execute(
+            "UPDATE channels SET history_complete = ? WHERE id = ?",
+            (history_complete, channel_id)
+        )
+
     def update_channel_backup_path(self, channel_id: int, backup_path: str | None) -> None:
         """Update channel backup_path for local media lookup."""
         cursor = self.cursor()
@@ -721,7 +792,7 @@ class Database:
     def get_download_all_channels(self) -> list[sqlite3.Row]:
         """Get all channels with download_all enabled."""
         cursor = self.cursor()
-        cursor.execute("SELECT * FROM channels WHERE active = 1 AND download_all = 1")
+        cursor.execute("SELECT * FROM channels WHERE active = 1 AND download_all = 1 AND (history_complete = 0 OR history_complete IS NULL)")
         return cursor.fetchall()
 
     def get_channels_by_group(self, group_id: int) -> list[sqlite3.Row]:
@@ -1349,6 +1420,51 @@ class Database:
         """, (content_hash, group_id, channel_id, message_id, message_date, int(time.time())))
 
         return None
+
+    # Embedding-based deduplication methods
+
+    def store_embedding(self, group_id: int, channel_id: int, message_id: int,
+                        message_date: int, embedding_bytes: bytes) -> None:
+        """Store a message embedding in the content_embeddings table."""
+        cursor = self.cursor()
+        cursor.execute("""
+            INSERT OR IGNORE INTO content_embeddings
+                (group_id, channel_id, message_id, message_date, embedding, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (group_id, channel_id, message_id, message_date,
+              embedding_bytes, int(time.time())))
+
+    def get_recent_embeddings(self, group_id: int, since_date: int) -> list[dict]:
+        """Get recent embeddings for a group within the time window.
+
+        Returns list of dicts with channel_id, message_id, embedding (bytes).
+        """
+        cursor = self.cursor()
+        cursor.execute("""
+            SELECT channel_id, message_id, embedding
+            FROM content_embeddings
+            WHERE group_id = ? AND message_date >= ?
+        """, (group_id, since_date))
+        return [{"channel_id": row[0], "message_id": row[1], "embedding": row[2]}
+                for row in cursor.fetchall()]
+
+    def embedding_exists(self, channel_id: int, message_id: int) -> bool:
+        """Check if an embedding already exists for this message."""
+        cursor = self.cursor()
+        cursor.execute("""
+            SELECT 1 FROM content_embeddings
+            WHERE channel_id = ? AND message_id = ?
+            LIMIT 1
+        """, (channel_id, message_id))
+        return cursor.fetchone() is not None
+
+    def cleanup_old_embeddings(self, before_date: int) -> int:
+        """Delete embeddings older than the given date. Returns count deleted."""
+        cursor = self.cursor()
+        cursor.execute("""
+            DELETE FROM content_embeddings WHERE message_date < ?
+        """, (before_date,))
+        return cursor.rowcount
 
     def get_short_messages_for_skip(self, channel_id: int, limit: int = 500, min_length: int = 50) -> list[int]:
         """Get unread message IDs that are too short for hashing and should be skipped."""

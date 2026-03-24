@@ -187,8 +187,15 @@ async def sync_history_via_daemon() -> None:
             with Database() as db:
                 oldest_id = db.get_oldest_message_id(channel_id)
 
-            if oldest_id is None or oldest_id <= 1:
-                logger.info(f"  {channel_title}: Already at beginning or no messages")
+            if oldest_id is None:
+                logger.info(f"  {channel_title}: No messages yet, skipping")
+                continue
+
+            if oldest_id <= 1:
+                logger.info(f"  {channel_title}: Already at beginning, marking history complete")
+                with Database() as db:
+                    db.update_channel_history_complete(channel_id, 1)
+                    db.commit()
                 continue
 
             backup_info = " (backup available)" if backup_path else ""
@@ -208,7 +215,10 @@ async def sync_history_via_daemon() -> None:
                 raw_messages = raw_messages[:MESSAGES_PER_BATCH]
 
                 if not raw_messages:
-                    logger.info(f"    Reached beginning of channel history")
+                    logger.info(f"    Reached beginning of channel history, marking complete")
+                    with Database() as db:
+                        db.update_channel_history_complete(channel_id, 1)
+                        db.commit()
                     continue
 
                 # Log message range
@@ -593,8 +603,15 @@ async def sync_history_direct() -> None:
             with Database() as db:
                 oldest_id = db.get_oldest_message_id(channel_id)
 
-            if oldest_id is None or oldest_id <= 1:
-                logger.info(f"  {channel_title}: Already at beginning or no messages")
+            if oldest_id is None:
+                logger.info(f"  {channel_title}: No messages yet, skipping")
+                continue
+
+            if oldest_id <= 1:
+                logger.info(f"  {channel_title}: Already at beginning, marking history complete")
+                with Database() as db:
+                    db.update_channel_history_complete(channel_id, 1)
+                    db.commit()
                 continue
 
             backup_info = " (backup available)" if backup_path else ""
@@ -618,7 +635,10 @@ async def sync_history_direct() -> None:
                             break
 
                 if not raw_messages:
-                    logger.info(f"    Reached beginning of channel history")
+                    logger.info(f"    Reached beginning of channel history, marking complete")
+                    with Database() as db:
+                        db.update_channel_history_complete(channel_id, 1)
+                        db.commit()
                     continue
 
                 # Log message range
